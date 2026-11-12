@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Unit tests
+        run: pytest
+      - name: Benchmark (random, 10 games)
+        run: python -m eval.run --agent random --games 10 --seed0 0
+      - name: Benchmark (greedy, 10 games)
+        run: python -m eval.run --agent greedy --games 10 --seed0 0

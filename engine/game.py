@@ -8,18 +8,24 @@ random and receives a 2 with probability 0.9 or a 4 with probability 0.1.
 All randomness comes from a per-game ``random.Random(seed)``, so a seed plus
 a move list fully determines a game (see eval/replay.py).
 
-NOTE (P1): this module is the *reference* implementation. P1 will replace the
-internals with a 64-bit bitboard (16 cells x 4 bits, each cell storing the
-exponent, with row lookup tables for slides) while keeping this exact public
-API. 4-bit cells can only hold exponents 0..15, i.e. tiles up to 2**15 =
-32,768, so the 65,536 tile (2**16) does NOT fit and must be handled
-explicitly (e.g. a 5th bit / side flag, or treating the merge of two 32,768s
-as a special case). The tests in tests/test_engine.py, including the 65,536
-merge test, must keep passing against the bitboard version.
+Internal representation (P1, Batch 1): ``Game.board`` stays a 4x4 nested list
+of tile VALUES (every agent reads it). Inside ``Game.slide`` each line is
+mapped to 5-bit exponents (0 = empty, k = tile 2**k) and packed into a 20-bit
+row key (4 cells x 5 bits), which indexes a lazily filled row table holding the
+slid row and the score gained. 5 bits hold exponents 0..31, so 32,768 + 32,768
+-> 65,536 (exponent 16) fits, which 4-bit cells cannot do. Boards containing
+anything that is not 0 or a power of two between 2 and 2**31 fall back to the
+original per-line merge, so behaviour never changes for odd inputs.
+See engine/README.md. The C++ core (Batch 3) will mirror this layout.
+
+Helpers (P1, Batch 2, pure Python): Game.from_board, afterstate, empty_cells,
+spawn_outcomes, exponents (needs numpy only when called) and play_batch.
+They sit below the Game class and never change how a Game plays.
 """
 
 from __future__ import annotations
 
+import numbers
 import random
 from typing import List, Optional, Sequence, Tuple
 
@@ -87,6 +93,186 @@ def _set_lines(lines: List[List[int]], move: int) -> Board:
     return board
 
 
+# ---------------------------------------------------------------- row table
+# 5 bits per cell: exponent 0 = empty, k = tile 2**k (max exponent 31).
+CELL_BITS = 5
+CELL_MASK = (1 << CELL_BITS) - 1
+MAX_EXP = CELL_MASK  # 31
+_VALUE_TO_EXP = {0: 0, **{1 << k: k for k in range(1, MAX_EXP + 1)}}
+
+# row key (20 bits) -> (slid row key, score gained). Filled lazily: a full
+# 2**20-entry table would cost seconds at import, and real games only touch a
+# small fraction of rows. The C++ core precomputes the whole table.
+_ROW_TABLE: dict = {}
+
+
+def pack_row(exps: Sequence[int]) -> int:
+    """Pack 4 exponents into a 20-bit key; cell 0 sits in the lowest bits."""
+    key = 0
+    for i, e in enumerate(exps):
+        key |= e << (CELL_BITS * i)
+    return key
+
+
+def unpack_row(key: int) -> List[int]:
+    return [(key >> (CELL_BITS * i)) & CELL_MASK for i in range(SIZE)]
+
+
+def _slide_row_exps(exps: Sequence[int]) -> Tuple[List[int], int]:
+    """Left-slide one row of exponents. Returns (exponents, score gained).
+
+    A merge of two tiles with exponent e makes exponent e+1 and scores
+    2**(e+1), exactly what _merge_line scores on tile values.
+    """
+    tiles = [e for e in exps if e]
+    out: List[int] = []
+    gained = 0
+    i = 0
+    while i < len(tiles):
+        if i + 1 < len(tiles) and tiles[i] == tiles[i + 1]:
+            out.append(tiles[i] + 1)
+            gained += 1 << (tiles[i] + 1)
+            i += 2
+        else:
+            out.append(tiles[i])
+            i += 1
+    out.extend([0] * (SIZE - len(out)))
+    return out, gained
+
+
+def row_table_entry(key: int) -> Tuple[int, int]:
+    """(slid row key, score gained) for a packed row, computed once, then cached."""
+    hit = _ROW_TABLE.get(key)
+    if hit is None:
+        out, gained = _slide_row_exps(unpack_row(key))
+        hit = _ROW_TABLE[key] = (pack_row(out), gained)
+    return hit
+
+
+def _slide_lines_table(lines: List[List[int]]):
+    """Table-driven slide of oriented lines; None if a cell is not encodable."""
+    result: List[List[int]] = []
+    gained = 0
+    for line in lines:
+        try:
+            key = pack_row([_VALUE_TO_EXP[v] for v in line])
+        except (KeyError, TypeError):
+            return None
+        out_key, g = row_table_entry(key)
+        result.append([(1 << e) if e else 0 for e in unpack_row(out_key)])
+        gained += g
+    return result, gained
+
+
+# ------------------------------------------------------------ Batch 2 helpers
+def _check_board_shape(board: Sequence[Sequence[int]]) -> None:
+    if len(board) != SIZE or any(len(row) != SIZE for row in board):
+        raise ValueError(f"board must be {SIZE}x{SIZE}")
+
+
+def afterstate(board: Sequence[Sequence[int]], move: int) -> Board:
+    """Board right after sliding in ``move``, BEFORE the random tile spawns.
+
+    Pure: ``board`` is not modified and a new board is returned. If the move
+    changes nothing (illegal) you simply get an equal copy back, so check
+    ``Game.is_legal(board, move)`` first when it matters. Need the merge score
+    too? Use ``Game.slide(board, move)``, which returns (afterstate, gained).
+    Raises ValueError for a move outside 0..3.
+    """
+    return Game.slide(board, move)[0]
+
+
+def empty_cells(board: Sequence[Sequence[int]]) -> List[Tuple[int, int]]:
+    """All (row, col) positions holding 0, in row-major order.
+
+    Same order as ``Game.empty_cells()``, which is what the spawn RNG indexes
+    into. (The method needs a Game; this function works on any board.)
+    """
+    return [(r, c) for r in range(SIZE) for c in range(SIZE) if board[r][c] == 0]
+
+
+def spawn_outcomes(board: Sequence[Sequence[int]]) -> List[Tuple[Board, float]]:
+    """Every board the next spawn can produce, with its probability.
+
+    A spawn picks one empty cell uniformly, then a 2 (p = PROB_TWO = 0.9) or a
+    4 (p = 0.1). With n empty cells that is 2n outcomes: p = 0.9 / n for each
+    "2" board and 0.1 / n for each "4" board, summing to 1. Order: empty cells
+    in row-major order, the 2 before the 4. A full board returns [] (no
+    spawn is possible). Boards are fresh copies; ``board`` is not modified.
+    Used by expectimax chance nodes (P3, P7).
+    """
+    cells = empty_cells(board)
+    n = len(cells)
+    outcomes: List[Tuple[Board, float]] = []
+    for r, c in cells:
+        for value, prob in ((2, PROB_TWO), (4, 1.0 - PROB_TWO)):
+            child = copy_board(board)
+            child[r][c] = value
+            outcomes.append((child, prob / n))
+    return outcomes
+
+
+def exponents(board: Sequence[Sequence[int]]):
+    """The board as a 4x4 NumPy array of log2 exponents (0 = empty, 2 -> 1,
+    65536 -> 16). Used by the n-tuple network (P5) and deep RL (P6).
+
+    dtype is int32 on purpose: smaller types such as int8 silently wrap around
+    when you compute table indexes like e0 + 16 * e1 + 256 * e2. Raises
+    ValueError for a cell that is not 0 or a power of two >= 2, and ImportError
+    with a clear message if numpy is not installed (numpy is only needed here).
+    """
+    try:
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise ImportError("exponents() needs numpy: pip install numpy") from exc
+    _check_board_shape(board)
+    out = np.zeros((SIZE, SIZE), dtype=np.int32)
+    for r in range(SIZE):
+        for c in range(SIZE):
+            v = board[r][c]
+            exp = _VALUE_TO_EXP.get(int(v)) if isinstance(v, numbers.Integral) else None
+            if exp is None:
+                raise ValueError(f"cell ({r},{c}) = {v!r} is not 0 or a power of two >= 2")
+            out[r, c] = exp
+    return out
+
+
+def _play_one(args):
+    agent_fn, seed = args
+    game = Game(seed)
+    while not game.done:
+        move = agent_fn(game)
+        if move not in game.legal_moves():
+            raise ValueError(f"agent chose {move!r} on seed {seed}; legal moves: {game.legal_moves()}")
+        game.step(move)
+    return {"seed": seed, "score": game.score, "max_tile": game.max_tile(),
+            "moves": list(game.moves), "board": copy_board(game.board)}
+
+
+def play_batch(agent_fn, seeds: Sequence[int], processes: int = 1) -> List[dict]:
+    """Play one full game per seed with ``agent_fn(game) -> move``.
+
+    ``agent_fn`` is called exactly like ``Agent.choose_move`` (e.g. pass
+    ``agent.choose_move``) and must return one of ``game.legal_moves()``;
+    anything else raises ValueError instead of looping forever. It must not
+    change the game it is given. Returns one dict per seed, in the SAME order
+    as ``seeds``: {"seed", "score", "max_tile", "moves" (list, replayable with
+    Game(seed)), "board" (final)}.
+
+    ``processes=1`` runs in this process. ``processes > 1`` uses a
+    multiprocessing pool, which needs ``agent_fn`` to be picklable (a
+    module-level function or a bound method of a picklable object, not a
+    lambda). Results are identical either way. Agents that keep state between
+    games should be given fresh state per seed inside ``agent_fn`` themselves.
+    """
+    jobs = [(agent_fn, seed) for seed in seeds]
+    if processes <= 1 or len(jobs) <= 1:
+        return [_play_one(job) for job in jobs]
+    import multiprocessing
+    with multiprocessing.Pool(processes) as pool:
+        return pool.map(_play_one, jobs)
+
+
 class Game:
     """A seeded 2048 game.
 
@@ -99,6 +285,18 @@ class Game:
 
     def __init__(self, seed: int = 0, board: Optional[Sequence[Sequence[int]]] = None):
         self.reset(seed, board)
+
+    @classmethod
+    def from_board(cls, board: Sequence[Sequence[int]], seed: int = 0) -> "Game":
+        """Start a game from any position (late-game benchmark, tests, search).
+
+        Same as ``Game(seed, board=board)`` plus a shape check. The board is
+        copied, no tiles are spawned at the start, and the RNG is seeded with
+        ``seed`` so the spawns that follow are reproducible. (``reset()`` with
+        no board still starts a normal game from the seed, as it always did.)
+        """
+        _check_board_shape(board)
+        return cls(seed, board)
 
     # ------------------------------------------------------------------ setup
     def reset(self, seed: Optional[int] = None, board: Optional[Sequence[Sequence[int]]] = None) -> Board:
@@ -123,6 +321,10 @@ class Game:
     def slide(board: Sequence[Sequence[int]], move: int) -> Tuple[Board, int]:
         """Pure: return (board after sliding in ``move``, score gained). No spawn."""
         lines = _get_lines(board, move)
+        fast = _slide_lines_table(lines)
+        if fast is not None:
+            return _set_lines(fast[0], move), fast[1]
+        # Fallback for cells that are not 0 / a power of two: original merge.
         merged = [_merge_line(line) for line in lines]
         new_board = _set_lines([m[0] for m in merged], move)
         return new_board, sum(m[1] for m in merged)

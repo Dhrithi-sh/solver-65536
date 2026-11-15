@@ -116,13 +116,15 @@ loops over games, logging and checkpoints.
 
 ### Weights
 
-- Saved with `np.savez_compressed`: `weights` (`float32[stages, 4, 16**6]`), `tuples`
-  (`int64[4, 6]`), and `meta` (a JSON string with the format version, alpha, games trained,
-  seed, stage thresholds and git commit). `load` rejects files whose tuple layout or version
-  doesn't match.
+- One binary file per network (`.ntw`): `b"NTUP"`, a uint32 header length, a JSON header
+  (format version, dtype, shape, tuple layout, clamp, plus `meta`: alpha, games trained,
+  seed, init value, git commit), then the raw little-endian float32 weights, starting on a
+  64-byte boundary. That's ~268 MB per network, uncompressed so it loads in about a second
+  with `np.fromfile`. `load` rejects files whose magic, version or tuple layout doesn't
+  match. Multi-stage training saves one file per stage.
 - Written to `weights/ntuple/` (already git-ignored). Trained weights are published on
   GitHub Releases.
-- The registered `ntuple` agent loads `$NTUPLE_WEIGHTS`, or else `weights/ntuple/latest.npz`.
+- The registered `ntuple` agent loads `$NTUPLE_WEIGHTS`, or else `weights/ntuple/latest.ntw`.
   If neither exists it uses zero weights and prints a warning. The agent still plays legal
   moves, so the shared tests pass without a weights file.
 

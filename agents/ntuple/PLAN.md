@@ -67,18 +67,21 @@ This is the layout from Yeh et al. 2017 (*Multistage Temporal Difference Learnin
 ### TD(0) on afterstates
 
 The afterstate is the board after the slide and before the random spawn. Learning `V` of
-afterstates means the player never has to average over spawns to choose a move. Per the
-task brief:
+afterstates means the player never has to average over spawns to choose a move.
 
-1. In state `s`, choose `a = argmax over legal moves of r(s,a) + V(afterstate(s,a))`.
-   Ties go to the lowest move number, so play is deterministic.
-2. The game spawns a tile, which gives the next state `s''`.
-3. Choose the next move the same way, with reward `r'` and afterstate `s'_next`.
-4. Update the previous afterstate: `delta = r' + V(s'_next) - V(s')`, then add
-   `(alpha / 32) * delta` to each of the 32 weights `s'` uses.
-5. If `s''` has no legal move (game over), the target is 0: `delta = 0 - V(s')`.
+1. **Play** the whole game first. In each state, choose
+   `a = argmax over legal moves of r(s,a) + V(afterstate(s,a))` (ties go to the lowest move
+   number, so play is deterministic). Record `(afterstate_t, reward_t)`, then spawn a tile.
+2. **Learn** once the game is over, walking the recorded afterstates **backwards**:
+   - last afterstate: `target = 0` (the spawn after it ended the game)
+   - afterstate `t`: `target = reward_{t+1} + V(afterstate_{t+1})`
+   - `V(afterstate_t) += alpha * (target - V(afterstate_t))`, applied as `alpha / 32` of the
+     error on each of its 32 weights.
 
-Default `alpha = 0.1`, spread over the 32 lookups as the brief says.
+This uses the same targets as online TD(0), which updates after every move. Going
+backwards means each target already uses the freshly updated value of the next afterstate,
+so the game's outcome reaches the first move in one pass. That makes it learn faster per
+game. Default `alpha = 0.1`. Implemented in `train.py`.
 
 ### Speed: numba
 

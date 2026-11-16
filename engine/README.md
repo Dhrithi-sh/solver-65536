@@ -22,7 +22,8 @@ Attributes: `board`, `score`, `moves`, `seed`, `done`. Moves: 0=up, 1=right,
 **Batch 3a (C++ core, done):** `engine/_core/core.*`, standalone self-test.
 **Batch 3b (pybind11 binding + build + CI):** `engine._cengine`, `setup.py`, CI on three OSes.
 Verification status of 3b is in "Optional C++ extension" below.
-**Batch 3c (fast C++ batch play, RNG decision):** not started.
+**Batch 3c (fast batch play, CPython-exact RNG):** `engine/_core/rng.hpp`, `batch.*`, `engine/batch.py`,
+deterministic `play_batch` option, `engine.bench` batch mode. See "Fast batch play (3c)" below.
 
 ## Representation (and why)
 
@@ -59,7 +60,66 @@ All are plain Python on top of the unchanged engine. `from engine.game import ..
 Design notes: `exponents` uses `int32` so index maths like `e0 + 32*e1 + 1024*e2` cannot
 wrap around (int8 would). `play_batch` returns the move list so any game can be replayed
 with `Game(seed)`. It is a plain-Python version; the fast parallel C++ version comes in Batch 3c
-with the same signature.
+with the same signature (3c keeps it and adds options; see below).
+
+## Fast batch play (Batch 3c)
+
+Two different jobs, two tools:
+
+| Need | Use | Speed |
+|---|---|---|
+| Many **random-policy** games as fast as possible (benchmarks, the 1M moves/sec target, baselines) | `engine.batch.play_random_batch(seeds, board=None, threads=0, record_moves=True)` | C++, all cores, GIL released |
+| Many games played by **any Python agent** (P5/P6 self-play) | `engine.game.play_batch(agent_fn, seeds, processes=N, deterministic=True)` | limited by the agent; scales with processes |
+
+A Python `agent_fn` cannot run inside C++, so only the random policy is fast. This is a deliberate
+trade-off: it covers the brief's "moves per second for random play" benchmark without changing the
+`agent_fn(game) -> move` contract.
+
+**How the C++ games stay identical to Python (the part to defend).** Spawns must come from
+`random.Random(seed)`, so `engine/_core/rng.hpp` re-implements the pieces of CPython's `random` the engine
+uses: the Mersenne Twister MT19937 with CPython's `init_by_array` seeding (`abs(seed)` split into 32-bit
+words, minimum one word, so negative seeds equal positive ones), `getrandbits(k)` = top k bits of one
+output, `random()` = `(a*2^26 + b)/2^53` from two outputs (`a = out>>5`, `b = out>>6`), and
+`randrange(n)` = draw `getrandbits(n.bit_length())` until `< n` (rejection loop; n = 1 still draws).
+`batch.cpp` then plays exactly `Game.reset`/`Game.step`: row-major empties, **cell first, then value**.
+Seeds are accepted only as exact Python ints with `abs(seed) < 2^64`; anything else (numpy ints, floats,
+huge ints) makes the extension answer `None` and Python plays the game.
+
+**The policy** is "uniform over the legal moves in order up, right, down, left", drawn from a *second*
+generator `random.Random(abs(seed) ^ 0x2545F4914F6CDD1D)` so picking moves never shifts the spawn sequence
+(same seed = same spawns for every agent). It exists in C++ and in plain Python (`RandomLegalPolicy`);
+the tests prove both play the same games.
+
+Return value: one dict per seed, in seed order, like `play_batch`:
+`{seed, score, max_tile, n_moves, moves (list, or None with record_moves=False), board}`. With `board=...`
+every game starts from that position (late-game benchmark); no tiles spawn at the start. Results never depend
+on `threads`. If a hand-made start board chains up to a 2^19 tile (outside the C++ tables, which accept
+exponents <= 18) the game is replayed by the Python engine, so the answer is still right.
+
+**`play_batch` determinism.** The signature and default behaviour are unchanged. Two optional keyword
+arguments were added: `deterministic=True` runs every game on a fresh deep copy of `agent_fn` and calls
+`reset(seed)` first when `agent_fn` is a bound method of an `Agent` (as `eval/run.py` does), so a game depends only on
+`(agent, seed)` and results are identical for any `processes`. Without it, an agent that keeps state (RNG,
+cache) gives results that depend on the process count and on how the pool chunks the seeds. `start_method`
+selects `fork`/`spawn`/`forkserver`; Windows and macOS default to `spawn`, where `agent_fn` must be importable
+and the script needs an `if __name__ == "__main__":` guard.
+
+### Speed (measured, not promised)
+
+`python -m engine.bench --seconds 3` times both loops end to end (spawn, RNG, legal check and move choice
+all inside the clock). Numbers from the development container (x86_64, **4 vCPU**, Python 3.13 unless noted;
+a laptop will differ):
+
+| Measurement | moves/sec |
+|---|---|
+| Python engine, `Game.step()` loop (`ENGINE_PURE_PYTHON=1`) | ~11,800 |
+| C++ core behind `Game.step()` (Python spawn + RNG) | ~190,000 |
+| `play_random_batch`, pure Python fallback | ~12,800 |
+| `play_random_batch`, C++, 1 thread | ~3,600,000 |
+| `play_random_batch`, C++, 4 threads | ~11,900,000 (Python 3.11: ~9,800,000) |
+
+So the 1M moves/sec target is met by the C++ batch path (including a single thread), and is **not** met by
+`Game.step()`, which is bound by Python's per-call overhead. Re-measure on your own machine before quoting.
 
 ## Optional C++ extension (`engine._cengine`)
 
@@ -120,8 +180,11 @@ Python delete `engine/_cengine*.so` / `engine/_cengine*.pyd` and the `build/` fo
 * `engine/_core/binding.cpp` (the pybind11 wrapper) and the Windows/macOS builds had **not** been
   compiled by the author when this was written. CI (`.github/workflows/ci.yml`) is what builds and tests them
   on Ubuntu, Windows and macOS; update this section with real results once it has run.
-* Speed: measure the integrated engine with `python -m engine.bench`. The 1M moves/sec target is for the
-  fast C++ batch loop planned in 3c, not for `Game.step()`.
+* Batch 3c (verified on Linux x86_64, g++, Python 3.13 and 3.11): full suite passes with and without the
+  extension (`ENGINE_PURE_PYTHON=1`), including the 10,000-game parity test. The pybind11 file `binding.cpp`
+  now compiles under g++/Linux only; the MSVC/clang builds of 3b and 3c still rely on CI.
+* Speed: see "Speed (measured, not promised)" above. The 1M moves/sec target applies to the C++ batch loop,
+  not to `Game.step()`.
 
 ## Compatibility guarantees
 
@@ -139,14 +202,21 @@ invalid move values, 32,768 + 32,768 -> 65,536 in every direction, the row table
 against `_merge_line` for all 17^4 rows (tiles up to 65,536), 3,000 random boards,
 original-rules oracle game vs `Game`, seed repeat / reset / replay, 90/10 spawn ratio.
 `tests/test_engine_helpers.py` (Batch 2) covers every helper in the table above.
+`tests/test_engine_rng.py` (3c) compares the C++ generator with `random.Random`: seeding (whole 624-word
+state, incl. negative/huge seeds), `getrandbits` widths 1..32, `random()` bit for bit, `randrange` and its output
+consumption, and the state after long runs. `tests/test_engine_batch.py` (3c) holds the brief's **10,000 seeded
+games** test (C++ batch vs the pure-Python engine in a `ENGINE_PURE_PYTHON=1` subprocess: scores, max tiles, move
+lists and final boards equal; `ENGINE_PARITY_GAMES` lowers the count for quick runs, ~40 s at 10,000), replay
+of C++ games on `Game`, thread-count independence, 32,768+32,768 start boards, out-of-range and unsupported
+inputs, and `play_batch` determinism (1/2/3 processes, `spawn`).
 
 ## TODO
 - [x] 5-bit exponent representation, 65,536 handled explicitly (Python)
 - [x] Bitboard-style C++ core (16 cells x 5-bit exponents) with row lookup tables for all 4 moves
 - [x] Same public API as `game.py` (extension used only behind it); `tests/test_engine.py` must pass unchanged
-- [ ] Target ≥ 1M moves/sec (needs the C++ batch loop, 3c); micro-benchmark script: `engine/bench.py` (done)
+- [x] Target ≥ 1M moves/sec: measured ~3.6M (1 thread) / ~11.9M (4 threads) for `play_random_batch` on the dev container; `Game.step()` stays ~0.19M; benchmark: `engine/bench.py`
 - [x] pybind11 binding `engine._cengine` + Python fallback (CI-verified status: see above)
 - [x] Differential tests: C++ vs Python (`tests/test_engine_cengine.py`)
 - [x] Helpers (Python): `Game.from_board`, `afterstate`, `empty_cells`, `spawn_outcomes`, `exponents`, `play_batch`
-- [ ] Fast C++ `play_batch`
+- [x] Fast C++ random self-play (`engine.batch.play_random_batch`) + deterministic parallel `play_batch` for arbitrary Python agents
 - [x] Build docs and CI (see above)

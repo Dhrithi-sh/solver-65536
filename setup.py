@@ -32,12 +32,15 @@ else:
     ext_modules = [
         Pybind11Extension(
             "engine._cengine",
-            sources=["engine/_core/binding.cpp", "engine/_core/core.cpp"],
+            sources=["engine/_core/binding.cpp", "engine/_core/core.cpp", "engine/_core/batch.cpp"],
             include_dirs=["engine/_core"],
-            depends=["engine/_core/core.hpp", "engine/_core/pyglue.hpp"],
+            depends=["engine/_core/core.hpp", "engine/_core/pyglue.hpp",
+                     "engine/_core/rng.hpp", "engine/_core/batch.hpp"],
             cxx_std=17,
             # core.cpp throws std::invalid_argument; MSVC needs /EHsc for that.
-            extra_compile_args=["/EHsc"] if sys.platform == "win32" else [],
+            # batch.cpp uses std::thread; older Linux toolchains need -pthread to link it.
+            extra_compile_args=["/EHsc"] if sys.platform == "win32" else ["-pthread"],
+            extra_link_args=[] if sys.platform == "win32" else ["-pthread"],
             optional=True,
         )
     ]

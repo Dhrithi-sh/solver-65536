@@ -84,3 +84,14 @@ real Python `Game.slide`.
 `engine/game.py` treats `None` as "use the pure-Python code". If the extension cannot be imported,
 or `ENGINE_PURE_PYTHON=1`, the Python engine is used for everything. These rules are exercised by
 `tests/test_engine_cengine.py`.
+
+## Batch 3c additions
+
+* `rng.hpp` - header-only CPython-compatible `random.Random` (MT19937, `init_by_array` seeding,
+  `getrandbits`, `random`, `randbelow`). Rules and the reasons are in the header comment.
+* `batch.hpp/.cpp` - whole random-policy games (`play_random_game`, `play_random_batch` with a
+  `std::thread` pool; results are written to per-seed slots so they never depend on the thread count).
+* `binding.cpp` exposes `play_random(seeds, board, threads, record_moves)` (GIL released while playing) and a
+  test-only `PyRandom` class. Both follow the "None = unsupported, use Python" rule.
+* The standalone `selftest.cpp` is unchanged; the RNG and batch code are tested from Python
+  (`tests/test_engine_rng.py`, `tests/test_engine_batch.py`) because the reference is `random.Random` itself.

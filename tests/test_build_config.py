@@ -32,7 +32,8 @@ def test_cpp_sources_are_not_packaged_as_python_packages():
 def test_setup_py_declares_the_optional_extension():
     with open(os.path.join(ROOT, "setup.py"), encoding="utf-8") as f:
         text = f.read()
-    for needle in ("engine._cengine", "engine/_core/binding.cpp", "engine/_core/core.cpp", "optional=True"):
+    for needle in ("engine._cengine", "engine/_core/binding.cpp", "engine/_core/core.cpp", "engine/_core/batch.cpp", "optional=True"):
         assert needle in text, needle
-    for rel in ("engine/_core/binding.cpp", "engine/_core/core.cpp", "engine/_core/core.hpp", "engine/_core/pyglue.hpp"):
+    for rel in ("engine/_core/binding.cpp", "engine/_core/core.cpp", "engine/_core/core.hpp", "engine/_core/pyglue.hpp",
+                "engine/_core/rng.hpp", "engine/_core/batch.hpp", "engine/_core/batch.cpp"):
         assert os.path.exists(os.path.join(ROOT, rel)), rel

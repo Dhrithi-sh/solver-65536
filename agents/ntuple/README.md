@@ -116,6 +116,13 @@ Compare them on equal terms with `scripts/ntuple_compare.sh`. It trains plain, m
 optimistic and both with the same games, seed and alpha (default 50,000 games), benchmarks
 each with `eval.run`, and prints a table. Use `GAMES=2000 EVAL_GAMES=100` for a quick check.
 
+The script splits stages at **2048** by default, not Yeh et al.'s 16,384. In 50,000 1-ply
+training games almost no game reaches 16,384, so stage 2 would never be used and multistage
+would equal plain (a 2,000-game check confirmed this). At 2048 most games cross the split, so
+the comparison measures whether a separate later-game network helps at our training scale.
+It does not show that the 16,384 split itself helps. Once long runs regularly reach
+8,192–16,384, rerun with `STAGE_TILE=16384`.
+
 ## Weights file format (`.ntw`)
 
 | bytes | content |

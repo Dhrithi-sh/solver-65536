@@ -3,7 +3,7 @@
 #
 # Trains 4 configurations with the SAME game count, seed and alpha:
 #   plain        TD(0), one network, all weights start at 0
-#   multistage   --stages 2 --stage-tile $STAGE_TILE      (Yeh et al. 2017)
+#   multistage   --stages 2 --stage-tile $STAGE_TILE      (Yeh et al. 2017; default 2048, see below)
 #   optimistic   --init-value $INIT_VALUE                  (Guei et al. 2022)
 #   both         multi-stage + optimistic
 # then benchmarks each with eval.run on the shared dev seeds (the only numbers
@@ -14,7 +14,13 @@
 #   GAMES=2000 EVAL_GAMES=100 scripts/ntuple_compare.sh   # quick smoke check
 #
 # Settings (environment variables):
-#   GAMES=50000  SEED=10000000  ALPHA=0.1  STAGE_TILE=16384  INIT_VALUE=50000
+#   GAMES=50000  SEED=10000000  ALPHA=0.1  STAGE_TILE=2048  INIT_VALUE=50000
+#
+# Why STAGE_TILE defaults to 2048, not Yeh et al.'s late-game 16384: in 50,000
+# 1-ply training games almost no game reaches 16,384, so stage 2 would never be
+# used and "multistage" would equal "plain". At 2048 most games cross the split,
+# so the comparison measures something. Once long runs reach 8,192-16,384
+# regularly, rerun with STAGE_TILE=16384 for the late-game version.
 #   EVAL_GAMES=1000 (seeds 0..EVAL_GAMES-1)  OUT=weights/ntuple/compare  PYTHON=python
 #
 # Re-running continues each run from its latest checkpoint, so an interrupted
@@ -25,7 +31,7 @@ set -euo pipefail
 GAMES=${GAMES:-50000}
 SEED=${SEED:-10000000}
 ALPHA=${ALPHA:-0.1}
-STAGE_TILE=${STAGE_TILE:-16384}
+STAGE_TILE=${STAGE_TILE:-2048}
 INIT_VALUE=${INIT_VALUE:-50000}
 EVAL_GAMES=${EVAL_GAMES:-1000}
 OUT=${OUT:-weights/ntuple/compare}

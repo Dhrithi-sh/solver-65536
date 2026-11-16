@@ -6,9 +6,17 @@ on:
   pull_request:
 
 jobs:
+  # Builds the C++ extension (engine._cengine) and tests with it, on three OSes.
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # tests/test_engine_cengine.py fails if the extension is missing while this is set
+      ENGINE_REQUIRE_CPP: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,6 +24,44 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Install build tools
+        run: pip install "setuptools>=64" wheel "pybind11>=2.11"
+      - name: Build the C++ extension in place
+        run: python setup.py build_ext --inplace
+      - name: Check the extension is really in use
+        # the extension is optional, so a failed compile would otherwise go unnoticed
+        run: python -c "from engine import game; print('backend =', game.backend()); assert game.backend() == 'cpp'"
+      - name: Unit tests (C++ backend)
+        run: pytest
+      - name: Unit tests (extension built but disabled with ENGINE_PURE_PYTHON=1)
+        run: pytest
+        env:
+          ENGINE_PURE_PYTHON: "1"
+          ENGINE_REQUIRE_CPP: "0"
+      - name: Engine speed (informational, no pass/fail threshold)
+        run: python -m engine.bench --seconds 2
+      - name: Benchmark (random, 10 games)
+        if: runner.os == 'Linux'
+        run: python -m eval.run --agent random --games 10 --seed0 0
+      - name: Benchmark (greedy, 10 games)
+        if: runner.os == 'Linux'
+        run: python -m eval.run --agent greedy --games 10 --seed0 0
+
+  # No compiler, no pybind11, no extension: the pure-Python fallback on its own.
+  test-pure-python:
+    name: test (pure-Python fallback)
+    runs-on: ubuntu-latest
+    env:
+      ENGINE_PURE_PYTHON: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Check the fallback is active
+        run: python -c "from engine import game; print('backend =', game.backend()); assert game.backend() == 'python'"
       - name: Unit tests
         run: pytest
       - name: Benchmark (random, 10 games)

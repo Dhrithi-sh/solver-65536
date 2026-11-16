@@ -18,6 +18,13 @@ anything that is not 0 or a power of two between 2 and 2**31 fall back to the
 original per-line merge, so behaviour never changes for odd inputs.
 See engine/README.md. The C++ core (Batch 3) will mirror this layout.
 
+Optional C++ core (P1, Batch 3b): if the compiled extension ``engine._cengine``
+is importable, Game.slide and Game.legal_moves ask it first. It answers None for
+anything it does not support (not a 4x4 list/tuple of exact ints, a cell that is
+not 0 or a power of two up to 2**18, a bad move), and then the pure-Python code
+below runs exactly as before. Spawning and the RNG always stay in Python. Set the
+environment variable ENGINE_PURE_PYTHON=1 to skip the extension; see backend().
+
 Helpers (P1, Batch 2, pure Python): Game.from_board, afterstate, empty_cells,
 spawn_outcomes, exponents (needs numpy only when called) and play_batch.
 They sit below the Game class and never change how a Game plays.
@@ -26,8 +33,25 @@ They sit below the Game class and never change how a Game plays.
 from __future__ import annotations
 
 import numbers
+import os
 import random
 from typing import List, Optional, Sequence, Tuple
+
+# ---------------------------------------------------- optional C++ extension
+# Never required: if it is missing, fails to load, or ENGINE_PURE_PYTHON is set
+# (anything except "" or "0"), _cengine stays None and everything runs in Python.
+_cengine = None
+if os.environ.get("ENGINE_PURE_PYTHON", "") in ("", "0"):
+    try:
+        from . import _cengine  # type: ignore[attr-defined]
+    except ImportError:  # not built / not loadable / not imported as a package
+        _cengine = None
+
+
+def backend() -> str:
+    """"cpp" if the compiled extension is in use, otherwise "python"."""
+    return "python" if _cengine is None else "cpp"
+
 
 Board = List[List[int]]
 
@@ -320,6 +344,11 @@ class Game:
     @staticmethod
     def slide(board: Sequence[Sequence[int]], move: int) -> Tuple[Board, int]:
         """Pure: return (board after sliding in ``move``, score gained). No spawn."""
+        if _cengine is not None and move.__class__ is int:
+            # None = "board/move not supported by the C++ core": use Python below.
+            result = _cengine.slide(board, move)
+            if result is not None:
+                return result
         lines = _get_lines(board, move)
         fast = _slide_lines_table(lines)
         if fast is not None:
@@ -336,6 +365,10 @@ class Game:
 
     # ---------------------------------------------------------------- queries
     def legal_moves(self) -> List[int]:
+        if _cengine is not None:
+            mask = _cengine.legal_mask(self.board)
+            if mask is not None:
+                return [m for m in MOVES if (mask >> m) & 1]
         return [m for m in MOVES if Game.is_legal(self.board, m)]
 
     def max_tile(self) -> int:

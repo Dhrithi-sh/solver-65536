@@ -1,9 +1,8 @@
 # engine/_core — C++ core (P1, Batch 3a)
 
-Status: **3a = C++ core + standalone checks.** The pybind11 binding, Python
-wiring, CI and `pyproject.toml` changes are sub-batch 3b (not here yet).
-Nothing in this folder is imported by Python yet, so the pure-Python engine
-behaves exactly as before.
+Status: C++ core (3a) plus the pybind11 binding (3b). Python uses it through
+`engine._cengine` (built with `python setup.py build_ext --inplace`, see
+`engine/README.md`). The standalone commands below still work without Python or pybind11.
 
 ## What is here
 
@@ -13,6 +12,8 @@ behaves exactly as before.
 | `selftest.cpp` | Standalone checks (no framework, exit code 0 = pass) |
 | `gen_golden.py` | Writes test vectors made by the **real Python engine** for `selftest` |
 | `bench.cpp` | Raw core speed (core only, no Python, not the game RNG) |
+| `pyglue.hpp` | Python <-> core conversion and validation (plain CPython C API, returns `None` for unsupported input) |
+| `binding.cpp` | The pybind11 module `engine._cengine` (thin wrapper around `pyglue.hpp`) |
 
 ## Design (beginner-friendly)
 
@@ -76,17 +77,10 @@ invalid move numbers throw); every one of the
 boards x 4 moves against an independent reference; and ~80,000 results produced by the
 real Python `Game.slide`.
 
-## Contract for the Python binding (sub-batch 3b)
+## How the binding keeps unsupported boards on the Python engine
 
-The binding must never hand an unsupported board to the C++ core. Planned rules:
-
-1. The Python wrapper pre-checks the board: 4x4, every cell an `int` that is 0 or a
-   power of two with exponent <= 18. Anything else (too big, not a power of two, wrong
-   shape) takes the existing pure-Python path, unchanged.
-2. The C++ entry point converts the board itself and raises `ValueError` if
-   `is_supported()` is false (defence in depth), instead of returning an unchanged board.
-3. If the extension is not built, `import` fails quietly and the Python engine is used.
-4. Tests for 3b will force each path (a supported board, an exponent-19 board, a
-   non-power-of-two board, extension missing) and compare with the Python engine.
-
-These rules are a plan; the binding does not exist yet, so none of this is tested.
+`pyglue.hpp` returns `None` (never raises) unless the board is a list/tuple of 4 list/tuples of 4
+**exact** Python ints, each 0 or a power of two from 2 to 2^18, and the move is an exact int 0..3.
+`engine/game.py` treats `None` as "use the pure-Python code". If the extension cannot be imported,
+or `ENGINE_PURE_PYTHON=1`, the Python engine is used for everything. These rules are exercised by
+`tests/test_engine_cengine.py`.

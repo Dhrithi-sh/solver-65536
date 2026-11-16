@@ -19,7 +19,10 @@ Attributes: `board`, `score`, `moves`, `seed`, `done`. Moves: 0=up, 1=right,
 `Game.slide`, 65,536 support, tests in `tests/test_engine_p1.py`.
 **Batch 2 (Python helpers, done):** `Game.from_board`, `afterstate`, `empty_cells`,
 `spawn_outcomes`, `exponents`, `play_batch`; tests in `tests/test_engine_helpers.py`.
-**Batch 3 (C++ / pybind11, not started).**
+**Batch 3a (C++ core, done):** `engine/_core/core.*`, standalone self-test.
+**Batch 3b (pybind11 binding + build + CI):** `engine._cengine`, `setup.py`, CI on three OSes.
+Verification status of 3b is in "Optional C++ extension" below.
+**Batch 3c (fast C++ batch play, RNG decision):** not started.
 
 ## Representation (and why)
 
@@ -38,7 +41,7 @@ Attributes: `board`, `score`, `moves`, `seed`, `done`. Moves: 0=up, 1=right,
 * **Fallback (trade-off):** if any cell is not 0 or a power of two in 2..2**31, `slide`
   uses the original `_merge_line`, so odd hand-made boards behave exactly as before.
 * **Speed:** Batch 1 optimises correctness, not speed. No speed numbers are claimed;
-  the micro-benchmark (`engine/bench.py`) comes with Batch 3.
+  measure it with `python -m engine.bench` (see below).
 
 ## Helpers (Batch 2)
 
@@ -55,8 +58,70 @@ All are plain Python on top of the unchanged engine. `from engine.game import ..
 
 Design notes: `exponents` uses `int32` so index maths like `e0 + 32*e1 + 1024*e2` cannot
 wrap around (int8 would). `play_batch` returns the move list so any game can be replayed
-with `Game(seed)`. It is a plain-Python version; the fast parallel C++ version comes in Batch 3
+with `Game(seed)`. It is a plain-Python version; the fast parallel C++ version comes in Batch 3c
 with the same signature.
+
+## Optional C++ extension (`engine._cengine`)
+
+`engine/game.py` imports the compiled module if it exists and falls back to the pure-Python
+engine otherwise, so **nothing below is required to use the engine**. The extension only speeds up
+`Game.slide` / `Game.legal_moves`; spawning and the seeded `random.Random` always stay in Python, so
+games are identical with or without it. It answers `None` for anything it does not support (not a
+4x4 list/tuple of exact ints, a cell that is not 0 or a power of two up to 2^18, a bad move) and the
+Python code then runs unchanged.
+
+Switches: `ENGINE_PURE_PYTHON=1` ignores the extension; `python -c "from engine import game; print(game.backend())"`
+prints `cpp` or `python`.
+
+### Build (always run from the repo root, inside your virtual environment)
+
+You need Python 3.11, a C++17 compiler, and `pybind11` + `setuptools` (build-time only; not runtime dependencies).
+The build is *optional*: if the compiler is missing or the compile fails, setuptools only prints a warning,
+so always check `backend()` afterwards.
+
+**Windows 10/11 (PowerShell).** Install "Build Tools for Visual Studio 2022" and tick the workload
+**Desktop development with C++** (MSVC v143 + a Windows SDK). Then:
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1          # if blocked: Set-ExecutionPolicy -Scope Process Bypass
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install "setuptools>=64" wheel "pybind11>=2.11"
+python setup.py build_ext --inplace
+python -c "from engine import game; print(game.backend())"     # expect: cpp
+python -m pytest
+python -m engine.bench --seconds 3                              # C++ backend
+$env:ENGINE_PURE_PYTHON = "1"; python -m engine.bench --seconds 3; Remove-Item Env:ENGINE_PURE_PYTHON
+```
+In `cmd.exe` use `.venv\Scripts\activate.bat` and `set ENGINE_PURE_PYTHON=1` / `set ENGINE_PURE_PYTHON=`.
+Run the build from the "x64 Native Tools Command Prompt" only if setuptools cannot find the compiler by itself.
+
+**macOS.** `xcode-select --install`, then:
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install "setuptools>=64" wheel "pybind11>=2.11"
+python setup.py build_ext --inplace
+python -c "from engine import game; print(game.backend())"     # expect: cpp
+python -m pytest && python -m engine.bench --seconds 3
+ENGINE_PURE_PYTHON=1 python -m engine.bench --seconds 3
+```
+
+**Linux (Debian/Ubuntu).** `sudo apt install build-essential python3.11-dev python3.11-venv`, then the same commands as macOS.
+
+After editing any C++ file rebuild with `python setup.py build_ext --inplace --force`. To go back to pure
+Python delete `engine/_cengine*.so` / `engine/_cengine*.pyd` and the `build/` folder (do not commit them).
+
+### Verification status (honest record)
+
+* Python integration, fallback, the `None` contract, and C++-vs-Python equality were tested through a
+  stand-in module built from the same `pyglue.hpp` + `core.cpp` on Linux (Python 3.12).
+* `engine/_core/binding.cpp` (the pybind11 wrapper) and the Windows/macOS builds had **not** been
+  compiled by the author when this was written. CI (`.github/workflows/ci.yml`) is what builds and tests them
+  on Ubuntu, Windows and macOS; update this section with real results once it has run.
+* Speed: measure the integrated engine with `python -m engine.bench`. The 1M moves/sec target is for the
+  fast C++ batch loop planned in 3c, not for `Game.step()`.
 
 ## Compatibility guarantees
 
@@ -77,11 +142,11 @@ original-rules oracle game vs `Game`, seed repeat / reset / replay, 90/10 spawn 
 
 ## TODO
 - [x] 5-bit exponent representation, 65,536 handled explicitly (Python)
-- [ ] 64-bit-style bitboard (16 cells x 5-bit exponents) with row lookup tables for all 4 moves in C++
-- [ ] Same public API as `game.py`; `tests/test_engine.py` must pass unchanged
-- [ ] Target ≥ 1M moves/sec; add a micro-benchmark script
-- [ ] Python bindings (pybind11) for the C/C++ core, Python fallback when not built
-- [ ] Differential test: C++ engine vs Python engine on random games
+- [x] Bitboard-style C++ core (16 cells x 5-bit exponents) with row lookup tables for all 4 moves
+- [x] Same public API as `game.py` (extension used only behind it); `tests/test_engine.py` must pass unchanged
+- [ ] Target ≥ 1M moves/sec (needs the C++ batch loop, 3c); micro-benchmark script: `engine/bench.py` (done)
+- [x] pybind11 binding `engine._cengine` + Python fallback (CI-verified status: see above)
+- [x] Differential tests: C++ vs Python (`tests/test_engine_cengine.py`)
 - [x] Helpers (Python): `Game.from_board`, `afterstate`, `empty_cells`, `spawn_outcomes`, `exponents`, `play_batch`
 - [ ] Fast C++ `play_batch`
-- [ ] Build docs (Windows / macOS / Linux) and CI
+- [x] Build docs and CI (see above)

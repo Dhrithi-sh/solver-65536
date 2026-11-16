@@ -118,6 +118,10 @@ a laptop will differ):
 | `play_random_batch`, C++, 1 thread | ~3,600,000 |
 | `play_random_batch`, C++, 4 threads | ~11,900,000 (Python 3.11: ~9,800,000) |
 
+Windows 11 laptop (AMD64, 14 logical CPUs, Python 3.11.9, MSVC), same command, single 3 s runs:
+`Game.step()` ~5,800 (pure Python) / ~103,000 (C++); `play_random_batch` ~5,100 (pure Python) /
+~2,270,000 (C++, 1 thread) / ~18,900,000 (C++, all 14 threads).
+
 So the 1M moves/sec target is met by the C++ batch path (including a single thread), and is **not** met by
 `Game.step()`, which is bound by Python's per-call overhead. Re-measure on your own machine before quoting.
 
@@ -183,6 +187,12 @@ Python delete `engine/_cengine*.so` / `engine/_cengine*.pyd` and the `build/` fo
 * Batch 3c (verified on Linux x86_64, g++, Python 3.13 and 3.11): full suite passes with and without the
   extension (`ENGINE_PURE_PYTHON=1`), including the 10,000-game parity test. The pybind11 file `binding.cpp`
   now compiles under g++/Linux only; the MSVC/clang builds of 3b and 3c still rely on CI.
+* Batch 3c on **Windows 11, Visual Studio Build Tools 18 (MSVC 14.52), Python 3.11.9**, verified locally: the extension builds
+  with `python setup.py build_ext --inplace` and `backend()` reports `cpp`; `pytest` passes in full with
+  `ENGINE_REQUIRE_CPP=1` (130 passed, incl. the 10,000-game parity test) and with `ENGINE_PURE_PYTHON=1`
+  (102 passed, 28 C++-only tests skipped); the standalone `selftest.cpp` compiles under `cl /W4` without
+  warnings and passes against `gen_golden.py`. `eval.run` logs are identical across runs and backends and replay
+  with `eval.replay`. macOS/clang still relies on CI.
 * Speed: see "Speed (measured, not promised)" above. The 1M moves/sec target applies to the C++ batch loop,
   not to `Game.step()`.
 

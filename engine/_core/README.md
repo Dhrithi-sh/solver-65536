@@ -11,7 +11,6 @@ Status: C++ core (3a) plus the pybind11 binding (3b). Python uses it through
 | `core.hpp` / `core.cpp` | Board type, row tables, `move`, `is_legal`, `legal_mask`, `empty_count`, `max_exponent`, conversions |
 | `selftest.cpp` | Standalone checks (no framework, exit code 0 = pass) |
 | `gen_golden.py` | Writes test vectors made by the **real Python engine** for `selftest` |
-| `bench.cpp` | Raw core speed (core only, no Python, not the game RNG) |
 | `pyglue.hpp` | Python <-> core conversion and validation (plain CPython C API, returns `None` for unsupported input) |
 | `binding.cpp` | The pybind11 module `engine._cengine` (thin wrapper around `pyglue.hpp`) |
 
@@ -47,7 +46,6 @@ You need a C++17 compiler. Nothing else for 3a (no Python packages, no pybind11)
 g++ -std=c++17 -O2 -Wall -Wextra -o selftest engine/_core/selftest.cpp engine/_core/core.cpp
 python engine/_core/gen_golden.py golden.txt
 ./selftest golden.txt
-g++ -std=c++17 -O2 -o bench engine/_core/bench.cpp engine/_core/core.cpp && ./bench 2
 ```
 
 **macOS** (`xcode-select --install` for clang): same commands, with `clang++` instead of `g++`.
@@ -59,12 +57,13 @@ VS 2022**), from the repo root:
 cl /std:c++17 /O2 /EHsc /W4 /Fe:selftest.exe engine\_core\selftest.cpp engine\_core\core.cpp
 python engine\_core\gen_golden.py golden.txt
 selftest.exe golden.txt
-cl /std:c++17 /O2 /EHsc /Fe:bench.exe engine\_core\bench.cpp engine\_core\core.cpp
-bench.exe 2
 ```
 **Windows, MinGW-w64** (e.g. via MSYS2): the Linux `g++` commands work unchanged.
 
-Do not commit `golden.txt`, `selftest(.exe)`, `bench(.exe)` or `*.obj`.
+Speed is measured from Python with `python -m engine.bench` (see `engine/README.md`); there is no
+standalone C++ benchmark.
+
+Do not commit `golden.txt`, `selftest(.exe)` or `*.obj`.
 
 ## What the checks cover
 

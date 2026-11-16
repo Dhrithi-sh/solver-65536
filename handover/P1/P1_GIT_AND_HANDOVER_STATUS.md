@@ -183,5 +183,8 @@ re-run the workflow from the Actions tab. (Expected behaviour; not tried on this
 
 ## 10. About this handover folder
 
-`handover/P1/` was created for the handover and is **not committed**. `AGENTS.md` lists top-level docs as
-"everyone, via a reviewed PR", so committing it should go through a PR (or the files can be shared outside the repo).
+All five handover documents in `handover/P1/` have been committed and pushed on branch `p1-handover-docs`
+(commit `e614e76`, based on `main` at `0e5e863`). That branch is separate from the P1 implementation branches
+(`p1-engine-batch3`, `p1-engine-batch3c`) and does not touch PR #10 or PR #11. `AGENTS.md` lists top-level docs as
+"everyone, via a reviewed PR", so the documents reach `main` only through a reviewed pull request from
+`p1-handover-docs`; they are not on `main` yet.

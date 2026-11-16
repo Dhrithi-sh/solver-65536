@@ -16,7 +16,8 @@ slid row and the score gained. 5 bits hold exponents 0..31, so 32,768 + 32,768
 -> 65,536 (exponent 16) fits, which 4-bit cells cannot do. Boards containing
 anything that is not 0 or a power of two between 2 and 2**31 fall back to the
 original per-line merge, so behaviour never changes for odd inputs.
-See engine/README.md. The C++ core (Batch 3) will mirror this layout.
+See engine/README.md. The C++ core (engine/_core, Batch 3) uses the same
+layout, with the whole 2**20-row table precomputed when the extension loads.
 
 Optional C++ core (P1, Batch 3b): if the compiled extension ``engine._cengine``
 is importable, Game.slide and Game.legal_moves ask it first. It answers None for

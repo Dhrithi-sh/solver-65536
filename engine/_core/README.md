@@ -1,8 +1,13 @@
-# engine/_core — C++ core (P1, Batch 3a)
+# engine/_core — C++ core (P1, Batches 3a, 3b and 3c)
 
-Status: C++ core (3a) plus the pybind11 binding (3b). Python uses it through
-`engine._cengine` (built with `python setup.py build_ext --inplace`, see
-`engine/README.md`). The standalone commands below still work without Python or pybind11.
+Status: C++ core (3a), the pybind11 binding (3b), and fast batch self-play (3c). Batch 3c adds
+`rng.hpp`, a bit-exact C++ copy of CPython's `random.Random` (MT19937 with CPython's seeding, `getrandbits`,
+`random`, `randrange`), and `batch.hpp` / `batch.cpp`, which play whole random-policy games in C++ across
+threads with exactly the spawns of `engine/game.py`; Python reaches them through
+`engine.batch.play_random_batch`. All of it is compiled into one extension, `engine._cengine` (built with
+`python setup.py build_ext --inplace`, see `engine/README.md`). The standalone commands below test the 3a
+core only and still work without Python or pybind11; the RNG and batch code are tested from Python (see
+"Batch 3c additions" at the end).
 
 ## What is here
 
@@ -12,7 +17,9 @@ Status: C++ core (3a) plus the pybind11 binding (3b). Python uses it through
 | `selftest.cpp` | Standalone checks (no framework, exit code 0 = pass) |
 | `gen_golden.py` | Writes test vectors made by the **real Python engine** for `selftest` |
 | `pyglue.hpp` | Python <-> core conversion and validation (plain CPython C API, returns `None` for unsupported input) |
-| `binding.cpp` | The pybind11 module `engine._cengine` (thin wrapper around `pyglue.hpp`) |
+| `binding.cpp` | The pybind11 module `engine._cengine`: exposes the core engine (`slide`, `legal_mask`, `MAX_SUPPORTED_EXP`, via `pyglue.hpp`), `play_random` (3c batch games, GIL released, plus `POLICY_SEED_MASK`) and the test-only `PyRandom` class (3c, compared against `random.Random` in the tests) |
+| `rng.hpp` | Header-only `PyRandom`: bit-exact C++ copy of CPython's `random.Random` (MT19937, `init_by_array` seeding, `getrandbits`, `random`, `randbelow`) (3c) |
+| `batch.hpp` / `batch.cpp` | Whole random-policy games in C++ (`play_random_game`, `play_random_batch` over a `std::thread` pool, one result slot per seed); same spawns and RNG order as `engine/game.py` (3c) |
 
 ## Design (beginner-friendly)
 

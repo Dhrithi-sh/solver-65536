@@ -16,7 +16,8 @@ slid row and the score gained. 5 bits hold exponents 0..31, so 32,768 + 32,768
 -> 65,536 (exponent 16) fits, which 4-bit cells cannot do. Boards containing
 anything that is not 0 or a power of two between 2 and 2**31 fall back to the
 original per-line merge, so behaviour never changes for odd inputs.
-See engine/README.md. The C++ core (Batch 3) will mirror this layout.
+See engine/README.md. The C++ core (engine/_core, Batch 3) uses the same
+layout, with the whole 2**20-row table precomputed when the extension loads.
 
 Optional C++ core (P1, Batch 3b): if the compiled extension ``engine._cengine``
 is importable, Game.slide and Game.legal_moves ask it first. It answers None for
@@ -32,6 +33,7 @@ They sit below the Game class and never change how a Game plays.
 
 from __future__ import annotations
 
+import copy
 import numbers
 import os
 import random
@@ -262,7 +264,15 @@ def exponents(board: Sequence[Sequence[int]]):
 
 
 def _play_one(args):
-    agent_fn, seed = args
+    agent_fn, seed, *rest = args
+    if rest and rest[0]:
+        # deterministic mode: this game gets its own copy of the agent (so no state
+        # leaks from other games, whatever the process count or chunking) and, for a
+        # bound method of an Agent, reset(seed) exactly like eval/run.py does.
+        agent_fn = copy.deepcopy(agent_fn)
+        reset = getattr(getattr(agent_fn, "__self__", None), "reset", None)
+        if callable(reset):
+            reset(seed)
     game = Game(seed)
     while not game.done:
         move = agent_fn(game)
@@ -273,7 +283,8 @@ def _play_one(args):
             "moves": list(game.moves), "board": copy_board(game.board)}
 
 
-def play_batch(agent_fn, seeds: Sequence[int], processes: int = 1) -> List[dict]:
+def play_batch(agent_fn, seeds: Sequence[int], processes: int = 1, *,
+               deterministic: bool = False, start_method: Optional[str] = None) -> List[dict]:
     """Play one full game per seed with ``agent_fn(game) -> move``.
 
     ``agent_fn`` is called exactly like ``Agent.choose_move`` (e.g. pass
@@ -286,15 +297,29 @@ def play_batch(agent_fn, seeds: Sequence[int], processes: int = 1) -> List[dict]
     ``processes=1`` runs in this process. ``processes > 1`` uses a
     multiprocessing pool, which needs ``agent_fn`` to be picklable (a
     module-level function or a bound method of a picklable object, not a
-    lambda). Results are identical either way. Agents that keep state between
-    games should be given fresh state per seed inside ``agent_fn`` themselves.
+    lambda). Results are identical either way FOR AGENTS WITHOUT STATE.
+
+    Agents that keep state between games (an RNG, a cache, a move counter) are the
+    catch: serially one object is shared by all games, while a pool hands each worker
+    a pickled copy and gives games to workers in chunks, so results would depend on
+    the process count. Pass ``deterministic=True`` to remove that: every game then
+    runs on a fresh deep copy of ``agent_fn`` and, if it is a bound method of an
+    object with ``reset(seed)`` (an ``Agent``), that is called first, so a game
+    depends only on (agent, seed), identical for any ``processes``.
+
+    ``start_method`` ("fork", "spawn" or "forkserver") picks the multiprocessing
+    start method; the default is the platform's (spawn on Windows and macOS, where
+    ``agent_fn`` must also be importable from a module, and the calling script needs
+    an ``if __name__ == "__main__":`` guard). Both keywords are optional additions;
+    the original call forms behave as before.
     """
-    jobs = [(agent_fn, seed) for seed in seeds]
+    jobs = [(agent_fn, seed, deterministic) for seed in seeds]
     if processes <= 1 or len(jobs) <= 1:
         return [_play_one(job) for job in jobs]
     import multiprocessing
-    with multiprocessing.Pool(processes) as pool:
-        return pool.map(_play_one, jobs)
+    with multiprocessing.get_context(start_method).Pool(processes) as pool:
+        # chunksize=1 in deterministic mode: one pickled agent copy per game.
+        return pool.map(_play_one, jobs, chunksize=1 if deterministic else None)
 
 
 class Game:

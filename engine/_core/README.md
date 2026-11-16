@@ -1,8 +1,13 @@
-# engine/_core — C++ core (P1, Batch 3a)
+# engine/_core — C++ core (P1, Batches 3a, 3b and 3c)
 
-Status: C++ core (3a) plus the pybind11 binding (3b). Python uses it through
-`engine._cengine` (built with `python setup.py build_ext --inplace`, see
-`engine/README.md`). The standalone commands below still work without Python or pybind11.
+Status: C++ core (3a), the pybind11 binding (3b), and fast batch self-play (3c). Batch 3c adds
+`rng.hpp`, a bit-exact C++ copy of CPython's `random.Random` (MT19937 with CPython's seeding, `getrandbits`,
+`random`, `randrange`), and `batch.hpp` / `batch.cpp`, which play whole random-policy games in C++ across
+threads with exactly the spawns of `engine/game.py`; Python reaches them through
+`engine.batch.play_random_batch`. All of it is compiled into one extension, `engine._cengine` (built with
+`python setup.py build_ext --inplace`, see `engine/README.md`). The standalone commands below test the 3a
+core only and still work without Python or pybind11; the RNG and batch code are tested from Python (see
+"Batch 3c additions" at the end).
 
 ## What is here
 
@@ -11,9 +16,10 @@ Status: C++ core (3a) plus the pybind11 binding (3b). Python uses it through
 | `core.hpp` / `core.cpp` | Board type, row tables, `move`, `is_legal`, `legal_mask`, `empty_count`, `max_exponent`, conversions |
 | `selftest.cpp` | Standalone checks (no framework, exit code 0 = pass) |
 | `gen_golden.py` | Writes test vectors made by the **real Python engine** for `selftest` |
-| `bench.cpp` | Raw core speed (core only, no Python, not the game RNG) |
 | `pyglue.hpp` | Python <-> core conversion and validation (plain CPython C API, returns `None` for unsupported input) |
-| `binding.cpp` | The pybind11 module `engine._cengine` (thin wrapper around `pyglue.hpp`) |
+| `binding.cpp` | The pybind11 module `engine._cengine`: exposes the core engine (`slide`, `legal_mask`, `MAX_SUPPORTED_EXP`, via `pyglue.hpp`), `play_random` (3c batch games, GIL released, plus `POLICY_SEED_MASK`) and the test-only `PyRandom` class (3c, compared against `random.Random` in the tests) |
+| `rng.hpp` | Header-only `PyRandom`: bit-exact C++ copy of CPython's `random.Random` (MT19937, `init_by_array` seeding, `getrandbits`, `random`, `randbelow`) (3c) |
+| `batch.hpp` / `batch.cpp` | Whole random-policy games in C++ (`play_random_game`, `play_random_batch` over a `std::thread` pool, one result slot per seed); same spawns and RNG order as `engine/game.py` (3c) |
 
 ## Design (beginner-friendly)
 
@@ -47,7 +53,6 @@ You need a C++17 compiler. Nothing else for 3a (no Python packages, no pybind11)
 g++ -std=c++17 -O2 -Wall -Wextra -o selftest engine/_core/selftest.cpp engine/_core/core.cpp
 python engine/_core/gen_golden.py golden.txt
 ./selftest golden.txt
-g++ -std=c++17 -O2 -o bench engine/_core/bench.cpp engine/_core/core.cpp && ./bench 2
 ```
 
 **macOS** (`xcode-select --install` for clang): same commands, with `clang++` instead of `g++`.
@@ -59,12 +64,13 @@ VS 2022**), from the repo root:
 cl /std:c++17 /O2 /EHsc /W4 /Fe:selftest.exe engine\_core\selftest.cpp engine\_core\core.cpp
 python engine\_core\gen_golden.py golden.txt
 selftest.exe golden.txt
-cl /std:c++17 /O2 /EHsc /Fe:bench.exe engine\_core\bench.cpp engine\_core\core.cpp
-bench.exe 2
 ```
 **Windows, MinGW-w64** (e.g. via MSYS2): the Linux `g++` commands work unchanged.
 
-Do not commit `golden.txt`, `selftest(.exe)`, `bench(.exe)` or `*.obj`.
+Speed is measured from Python with `python -m engine.bench` (see `engine/README.md`); there is no
+standalone C++ benchmark.
+
+Do not commit `golden.txt`, `selftest(.exe)` or `*.obj`.
 
 ## What the checks cover
 
@@ -84,3 +90,14 @@ real Python `Game.slide`.
 `engine/game.py` treats `None` as "use the pure-Python code". If the extension cannot be imported,
 or `ENGINE_PURE_PYTHON=1`, the Python engine is used for everything. These rules are exercised by
 `tests/test_engine_cengine.py`.
+
+## Batch 3c additions
+
+* `rng.hpp` - header-only CPython-compatible `random.Random` (MT19937, `init_by_array` seeding,
+  `getrandbits`, `random`, `randbelow`). Rules and the reasons are in the header comment.
+* `batch.hpp/.cpp` - whole random-policy games (`play_random_game`, `play_random_batch` with a
+  `std::thread` pool; results are written to per-seed slots so they never depend on the thread count).
+* `binding.cpp` exposes `play_random(seeds, board, threads, record_moves)` (GIL released while playing) and a
+  test-only `PyRandom` class. Both follow the "None = unsupported, use Python" rule.
+* The standalone `selftest.cpp` is unchanged; the RNG and batch code are tested from Python
+  (`tests/test_engine_rng.py`, `tests/test_engine_batch.py`) because the reference is `random.Random` itself.

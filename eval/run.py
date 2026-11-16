@@ -10,11 +10,16 @@ line per game:
 "3"=left); eval/replay.py turns it back into the game.
 
 To add an agent: import it and add a zero-argument factory to AGENTS.
+Agents that load a weights file may also accept an optional ``weights=``
+keyword; ``--weights PATH`` passes it through, e.g.
+
+    python -m eval.run --agent ntuple --games 100 --seed0 0 --weights weights/ntuple/run1/latest.ntw
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import statistics
 import time
@@ -23,11 +28,13 @@ from typing import Callable, Dict, List
 
 from agents.base import Agent
 from agents.baselines import GreedyAgent, RandomAgent
+from agents.ntuple.agent import make_ntuple_agent
 from engine.game import Game
 
-AGENTS: Dict[str, Callable[[], Agent]] = {
+AGENTS: Dict[str, Callable[..., Agent]] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
+    "ntuple": make_ntuple_agent,  # weights: --weights, $NTUPLE_WEIGHTS, or weights/ntuple/latest.ntw
 }
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)
@@ -85,9 +92,16 @@ def main(argv: List[str] | None = None) -> dict:
     p.add_argument("--games", type=int, default=100)
     p.add_argument("--seed0", type=int, default=0)
     p.add_argument("--out-dir", default="results")
+    p.add_argument("--weights", default=None, help="weights file, for agents that load one (e.g. ntuple)")
     args = p.parse_args(argv)
 
-    agent = AGENTS[args.agent]()
+    factory = AGENTS[args.agent]
+    if args.weights is not None and "weights" not in inspect.signature(factory).parameters:
+        p.error(f"agent {args.agent!r} does not take --weights")
+    try:
+        agent = factory() if args.weights is None else factory(weights=args.weights)
+    except FileNotFoundError as e:  # e.g. missing weights: show the message, not a traceback
+        p.exit(2, f"error: {e}\n")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.agent}.jsonl"

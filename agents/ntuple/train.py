@@ -17,6 +17,14 @@ One game (all inside numba, see ``play_and_learn``):
    uses the freshly updated value of the next afterstate, so a game's final
    outcome flows all the way back to its first move in a single pass.
 
+Improvements (flags, so each can be compared with the plain run):
+    --stages 2 --stage-tile 16384   multi-stage TD (Yeh et al. 2017): a separate
+        network for boards holding >= 16,384; stage 2 is warm-started from
+        stage 1 the first time any game reaches it.
+    --init-value V                  optimistic initialisation (Guei et al. 2022):
+        every board starts valued at V, so unvisited positions look attractive
+        and get explored until real experience pulls them down.
+
 Outputs in ``--out``:
     train_log.csv   one row per ``--log-every`` games (stats over that window)
     latest.ntw      checkpoint: weights + RNG state + counters (resumable)
@@ -34,13 +42,20 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
 from agents.ntuple._jit import njit
 from agents.ntuple.board import is_game_over, legal_moves, make_rng, next_u32, slide, spawn_random
-from agents.ntuple.network import NTupleNetwork, evaluate_exps, update_exps
+from agents.ntuple.network import (
+    StagedNetwork,
+    ensure_stage_started,
+    evaluate_exps,
+    evaluate_staged,
+    stage_of,
+    update_staged,
+)
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768)
 MILESTONE_EXPS = tuple(t.bit_length() - 1 for t in MILESTONES)
@@ -54,9 +69,12 @@ MAX_MOVES = 1 << 17
 
 # -------------------------------------------------------------------- kernels
 @njit(cache=True)
-def choose_move(weights: np.ndarray, board: np.ndarray):
+def choose_move(weights3: np.ndarray, stage_exps: np.ndarray, started: np.ndarray, board: np.ndarray):
     """1-ply greedy: argmax over legal moves of reward + V(afterstate).
 
+    Each afterstate is scored by its own stage's network. If an afterstate is
+    the first ever to reach a new stage, that stage is warm-started from the
+    previous one (training only; the agent passes ``started`` = all ones).
     Returns (move, afterstate, reward); move = -1 if no move is legal.
     Ties go to the lowest move number, so play is deterministic.
     """
@@ -68,7 +86,10 @@ def choose_move(weights: np.ndarray, board: np.ndarray):
         after, reward, changed = slide(board, m)
         if not changed:
             continue
-        value = reward + evaluate_exps(weights, after)
+        s = stage_of(after, stage_exps)
+        if started[s] == 0:
+            ensure_stage_started(weights3, started, s)
+        value = reward + evaluate_exps(weights3[s], after)
         if best_move == -1 or value > best_value:
             best_move = m
             best_value = value
@@ -78,25 +99,29 @@ def choose_move(weights: np.ndarray, board: np.ndarray):
 
 
 @njit(cache=True)
-def learn_backward(weights: np.ndarray, afterstates: np.ndarray, rewards: np.ndarray, n: int, alpha: float) -> None:
+def learn_backward(
+    weights3: np.ndarray, stage_exps: np.ndarray, afterstates: np.ndarray, rewards: np.ndarray, n: int, alpha: float
+) -> None:
     """Backward TD(0) pass over the n recorded (afterstate, reward) pairs.
 
     rewards[t] is the reward of the move that produced afterstates[t]; the
     target for afterstate t uses the reward of the NEXT move, rewards[t+1].
+    Every value is read and written in that afterstate's own stage, so at a
+    stage boundary the last stage-1 afterstate learns from V_stage2(next).
     """
     if n == 0:
         return
     # The final afterstate was followed by a spawn that ended the game.
     last = afterstates[n - 1]
-    update_exps(weights, last, alpha * (0.0 - evaluate_exps(weights, last)))
+    update_staged(weights3, stage_exps, last, alpha * (0.0 - evaluate_staged(weights3, stage_exps, last)))
     for t in range(n - 2, -1, -1):
-        target = rewards[t + 1] + evaluate_exps(weights, afterstates[t + 1])
+        target = rewards[t + 1] + evaluate_staged(weights3, stage_exps, afterstates[t + 1])
         s = afterstates[t]
-        update_exps(weights, s, alpha * (target - evaluate_exps(weights, s)))
+        update_staged(weights3, stage_exps, s, alpha * (target - evaluate_staged(weights3, stage_exps, s)))
 
 
 @njit(cache=True)
-def play_and_learn(weights, rng_state, alpha, afterstates, rewards):
+def play_and_learn(weights3, stage_exps, started, rng_state, alpha, afterstates, rewards):
     """Play one self-play game, then learn from it. Returns (score, max_exp, moves).
 
     With alpha = 0 nothing is learned (useful as a baseline).
@@ -107,7 +132,7 @@ def play_and_learn(weights, rng_state, alpha, afterstates, rewards):
     n = 0
     score = 0
     while True:
-        move, after, reward = choose_move(weights, board)
+        move, after, reward = choose_move(weights3, stage_exps, started, board)
         if move == -1:
             break
         afterstates[n, :] = after
@@ -121,7 +146,7 @@ def play_and_learn(weights, rng_state, alpha, afterstates, rewards):
         if board[k] > max_exp:
             max_exp = board[k]
     if alpha != 0.0:
-        learn_backward(weights, afterstates, rewards, n, alpha)
+        learn_backward(weights3, stage_exps, afterstates, rewards, n, alpha)
     return score, max_exp, n
 
 
@@ -195,7 +220,7 @@ def _progress_line(row: Dict, total: int, elapsed: float, games_done_this_run: i
 
 
 # --------------------------------------------------------------- checkpoints
-def save_checkpoint(net: NTupleNetwork, out: Path, state: Dict, keep: bool) -> Path:
+def save_checkpoint(net: StagedNetwork, out: Path, state: Dict, keep: bool) -> Path:
     """Write latest.ntw atomically (temp file + rename) so a crash mid-save
     never leaves a broken checkpoint. ``state`` goes into the file's metadata."""
     net.meta.update(state)
@@ -221,17 +246,28 @@ def train(
     init_value: float = 0.0,
     keep_checkpoints: bool = False,
     verbose: bool = True,
+    stages: int = 1,
+    stage_tiles: Optional[Sequence[int]] = None,
 ) -> Dict:
     """Train until ``games`` games in total have been played (counting resumed ones).
 
+    stages / stage_tiles: multi-stage TD. With stages=2 and stage_tiles=[16384],
+        boards whose max tile is below 16,384 use network 1, the rest network 2.
+    init_value: optimistic initialisation; every board's value starts here.
     Returns {"net", "rows", "games"}; rows are the CSV rows written this run.
     """
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
+    if stage_tiles is None:
+        stage_tiles = [16384] if stages == 2 else []
 
     if resume:
-        net = NTupleNetwork.load(resume)
+        net = StagedNetwork.load(resume)
+        if verbose and (net.n_stages != stages or net.stage_tiles != list(stage_tiles)):
+            print(f"note: using the checkpoint's {net.n_stages} stage(s) {net.stage_tiles}, "
+                  f"not --stages {stages} {list(stage_tiles)}", flush=True)
         m = net.meta
+        started = np.array(m.get("stages_started", [1] * net.n_stages), dtype=np.uint8)
         done = int(m["games"])
         rng_state = np.array([int(m["rng_state"])], dtype=np.int64)
         elapsed0 = float(m["elapsed_s"])
@@ -243,7 +279,9 @@ def train(
         if verbose:
             print(f"resumed {resume}: {done:,} games, {_fmt_time(elapsed0)} trained", flush=True)
     else:
-        net = NTupleNetwork(init_value=init_value)
+        net = StagedNetwork(stages, stage_tiles, init_value=init_value)
+        started = np.zeros(stages, dtype=np.uint8)
+        started[0] = 1  # later stages are warm-started when first reached
         done, elapsed0 = 0, 0.0
         rng_state = make_rng(seed)
         win_scores, win_exps, win_moves = [], [], []
@@ -269,17 +307,22 @@ def train(
             "window_scores": win_scores,
             "window_max_exps": win_exps,
             "window_moves": win_moves,
+            "stages_started": [int(x) for x in started],
         }
 
     if verbose:
-        print(f"training to {games:,} games | alpha={alpha} seed={seed} out={out}", flush=True)
+        staging = f" stages={net.n_stages} {net.stage_tiles}" if net.n_stages > 1 else ""
+        print(f"training to {games:,} games | alpha={alpha} seed={seed} init={init_value}{staging} out={out}",
+              flush=True)
     with log_path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if new_log:
             writer.writeheader()
         try:
             while done < games:
-                score, max_exp, n = play_and_learn(net.weights, rng_state, alpha, afterstates, rewards)
+                score, max_exp, n = play_and_learn(
+                    net.weights, net.stage_exps, started, rng_state, alpha, afterstates, rewards
+                )
                 done += 1
                 win_scores.append(int(score))
                 win_exps.append(int(max_exp))
@@ -320,14 +363,24 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--checkpoint-every", type=int, default=10_000)
     p.add_argument("--log-every", type=int, default=1_000)
     p.add_argument("--resume", default=None, help="checkpoint .ntw to continue from")
-    p.add_argument("--init-value", type=float, default=0.0, help="initial value of every weight")
+    p.add_argument("--init-value", type=float, default=0.0,
+                   help="optimistic init: every board's value starts here (each weight = V/32)")
+    p.add_argument("--stages", type=int, default=1, help="number of stage networks (multi-stage TD)")
+    p.add_argument("--stage-tile", type=int, nargs="+", default=None,
+                   help="tile(s) that start the next stage; default 16384 for --stages 2")
     p.add_argument("--keep-checkpoints", action="store_true", help="also keep numbered ckpt_<N>.ntw files")
     a = p.parse_args(argv)
+    if a.stages < 1:
+        p.error("--stages must be >= 1")
+    if a.stages > 2 and a.stage_tile is None:
+        p.error(f"--stages {a.stages} needs {a.stages - 1} --stage-tile values")
     try:
         train(
             a.games, a.alpha, a.seed, a.out, a.checkpoint_every, a.log_every,
-            a.resume, a.init_value, a.keep_checkpoints,
+            a.resume, a.init_value, a.keep_checkpoints, stages=a.stages, stage_tiles=a.stage_tile,
         )
+    except ValueError as e:  # e.g. bad stage tiles
+        p.error(str(e))
     except KeyboardInterrupt:
         sys.exit(130)
 

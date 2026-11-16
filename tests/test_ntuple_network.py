@@ -102,9 +102,9 @@ def test_evaluate_is_pure(random_net):
 
 # ------------------------------------------------------------------- init
 def test_constant_init():
-    net = nn.NTupleNetwork(init_value=0.5)
+    net = nn.NTupleNetwork(init_value=16.0)
+    # init_value is the starting value of a whole board: each weight is 16 / 32.
     assert float(net.weights.min()) == float(net.weights.max()) == 0.5
-    # Every board starts at 32 * init_value.
     assert net.evaluate(random_boards(1, seed=5)[0]) == pytest.approx(16.0)
 
 

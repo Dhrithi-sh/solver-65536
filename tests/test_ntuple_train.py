@@ -7,7 +7,7 @@ import pytest
 
 from agents.ntuple import train as tr
 from agents.ntuple.board import make_rng
-from agents.ntuple.network import NTupleNetwork
+from agents.ntuple.network import NTupleNetwork, StagedNetwork
 
 
 def distinct_board(seed: int) -> np.ndarray:
@@ -21,20 +21,20 @@ def test_backward_pass_worked_example():
     B is last:  target 0,           V(B) = 0 + 0.5 * (0 - 0) = 0
     A:          target 4 + V(B) = 4, V(A) = 0 + 0.5 * (4 - 0) = 2
     """
-    net = NTupleNetwork()
+    net = StagedNetwork()
     a, b = distinct_board(1), distinct_board(2)
     afterstates = np.stack([a, b])
     rewards = np.array([0, 4], dtype=np.int64)  # rewards[1] = reward of the move that made B
-    tr.learn_backward(net.weights, afterstates, rewards, 2, 0.5)
+    tr.learn_backward(net.weights, net.stage_exps, afterstates, rewards, 2, 0.5)
     assert net.evaluate(b) == pytest.approx(0.0)
     assert net.evaluate(a) == pytest.approx(2.0)
 
 
 def test_last_afterstate_moves_toward_zero():
-    net = NTupleNetwork()
+    net = StagedNetwork()
     s = distinct_board(3)
     net.update(s, 10.0)  # V(s) = 10
-    tr.learn_backward(net.weights, s[None, :], np.zeros(1, dtype=np.int64), 1, 0.1)
+    tr.learn_backward(net.weights, net.stage_exps, s[None, :], np.zeros(1, dtype=np.int64), 1, 0.1)
     assert net.evaluate(s) == pytest.approx(9.0, rel=1e-5)  # 10 + 0.1 * (0 - 10)
 
 

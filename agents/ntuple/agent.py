@@ -25,7 +25,9 @@ from typing import Dict, Optional, Sequence, Union
 
 from agents.base import Agent, ValueFunction
 from agents.ntuple.board import slide, to_exponents
-from agents.ntuple.network import NTupleNetwork, as_exponents
+import numpy as np
+
+from agents.ntuple.network import NTupleNetwork, StagedNetwork, as_exponents
 from agents.ntuple.train import choose_move as _choose_move_kernel
 from engine.game import Game
 
@@ -59,29 +61,43 @@ def resolve_weights_path(path: Optional[PathLike] = None) -> Path:
 
 
 @lru_cache(maxsize=2)
-def _load_cached(resolved: str, mtime_ns: int, size: int) -> NTupleNetwork:
-    """Load each weights file once per process (it is 268 MB). The key includes
-    mtime and size, so a re-trained file at the same path is picked up."""
-    return NTupleNetwork.load(resolved)
+def _load_cached(resolved: str, mtime_ns: int, size: int) -> StagedNetwork:
+    """Load each weights file once per process (268 MB per stage). The key
+    includes mtime and size, so a re-trained file at the same path is picked up."""
+    return StagedNetwork.load(resolved)
 
 
 class NTupleEvaluator(ValueFunction):
     """V(board) from a trained n-tuple network. Read-only and pure.
 
     Pass ``weights_path`` (or rely on $NTUPLE_WEIGHTS / the default), or an
-    already-built ``network`` (used by tests and by training code).
-    Evaluators loading the same file share one copy of the tables.
+    already-built ``network`` (a StagedNetwork, or a plain NTupleNetwork which
+    is treated as one stage). Multi-stage weights pick the right stage per
+    board automatically. Evaluators loading the same file share one copy.
     """
 
-    def __init__(self, weights_path: Optional[PathLike] = None, network: Optional[NTupleNetwork] = None):
+    def __init__(
+        self,
+        weights_path: Optional[PathLike] = None,
+        network: Optional[Union[StagedNetwork, NTupleNetwork]] = None,
+    ):
         if network is None:
             path = resolve_weights_path(weights_path)
             st = path.stat()
             network = _load_cached(str(path.resolve()), st.st_mtime_ns, st.st_size)
             self.weights_path: Optional[Path] = path
         else:
+            if isinstance(network, NTupleNetwork):
+                network = StagedNetwork.from_network(network)
             self.weights_path = None
-        self.network = network
+        self.network: StagedNetwork = network
+        # "Every stage already started": the shared move kernel must never
+        # warm-start (copy) stages when it is only being used to play.
+        self._all_started = np.ones(network.n_stages, dtype=np.uint8)
+
+    def stage_of(self, board: Sequence[Sequence[int]]) -> int:
+        """Which stage network scores this board (0 for single-stage weights)."""
+        return self.network.stage_of(board)
 
     def evaluate(self, board: Sequence[Sequence[int]]) -> float:
         """Value of an engine board (4x4 tile values, 0 = empty).
@@ -119,7 +135,10 @@ class NTupleAgent(Agent):
     def choose_move(self, game: Game) -> int:
         # Same computation as move_values, done in one numba call for speed.
         # Only reads game.board; the game itself is never modified.
-        move, _, _ = _choose_move_kernel(self.evaluator.network.weights, to_exponents(game.board))
+        ev = self.evaluator
+        move, _, _ = _choose_move_kernel(
+            ev.network.weights, ev.network.stage_exps, ev._all_started, to_exponents(game.board)
+        )
         if move < 0:
             raise RuntimeError("choose_move called on a finished game")
         return int(move)

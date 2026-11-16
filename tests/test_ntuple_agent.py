@@ -19,8 +19,9 @@ def trained_net():
     net = NTupleNetwork()
     buf = np.zeros((MAX_MOVES, 16), np.uint8), np.zeros(MAX_MOVES, np.int64)
     state = make_rng(123)
+    w3, no_stages, started = net.weights[None], np.zeros(0, np.int64), np.ones(1, np.uint8)
     for _ in range(50):
-        play_and_learn(net.weights, state, 0.1, *buf)
+        play_and_learn(w3, no_stages, started, state, 0.1, *buf)
     return net
 
 

@@ -23,11 +23,13 @@ from typing import Callable, Dict, List
 
 from agents.base import Agent
 from agents.baselines import GreedyAgent, RandomAgent
+from agents.heuristics import heuristic_agents
 from engine.game import Game
 
 AGENTS: Dict[str, Callable[[], Agent]] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
+    **heuristic_agents(),
 }
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)

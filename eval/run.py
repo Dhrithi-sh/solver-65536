@@ -48,6 +48,8 @@ def _expectimax(depth, **kw):
 
 AGENTS["expectimax-d1"] = _expectimax(1)
 AGENTS["expectimax-d2"] = _expectimax(2)
+AGENTS["expectimax-d2-c01"] = _expectimax(2, cutoff=0.01, name="expectimax-d2-c01")
+AGENTS["expectimax-adaptive"] = _expectimax(1, adaptive=True, name="expectimax-adaptive")
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)
 

@@ -36,3 +36,12 @@ def test_transposition_table_does_not_change_values():
     a = ExpectimaxAgent(TopLeft(), depth=2, cutoff=0, use_tt=True)
     b = ExpectimaxAgent(TopLeft(), depth=2, cutoff=0, use_tt=False)
     assert a.move_values(BOARD) == pytest.approx(b.move_values(BOARD))
+
+def test_adaptive_depth_goes_deeper_when_crowded():
+    crowded = [[2, 4, 8, 16], [32, 64, 128, 256],
+               [512, 1024, 2048, 4096], [8192, 0, 0, 0]]
+    open_ = [[2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
+    a = ExpectimaxAgent(TopLeft(), depth=2, adaptive=True)
+    assert a._pick_depth(crowded) > 2
+    assert a._pick_depth(open_) == 2
+    assert ExpectimaxAgent(TopLeft(), depth=2)._pick_depth(crowded) == 2

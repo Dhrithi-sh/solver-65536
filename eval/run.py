@@ -20,14 +20,32 @@ import statistics
 import time
 from pathlib import Path
 from typing import Callable, Dict, List
-
+from agents.heuristics import HeuristicAgent, HeuristicEvaluator
 from agents.base import Agent
-from agents.baselines import GreedyAgent, RandomAgent
+from agents.baselines.mcts_agent import MCTSAgent
+from agents.baselines import (
+    CornerAgent,
+    GreedyAgent,
+    MinimaxAgent,
+    MonteCarloAgent,
+    RandomAgent,
+)
 from engine.game import Game
-
+def make_heuristic():
+    evaluator = HeuristicEvaluator.from_file("tuned")
+    return HeuristicAgent(evaluator=evaluator)
+def make_minimax_heuristic():
+    evaluator = HeuristicEvaluator.from_file("tuned")
+    return MinimaxAgent(depth=1, evaluator=evaluator)
 AGENTS: Dict[str, Callable[[], Agent]] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
+    "corner": CornerAgent,
+    "minimax": MinimaxAgent,
+    "monte_carlo": MonteCarloAgent,
+    "minimax_heuristic": make_minimax_heuristic,
+    "heuristic": make_heuristic,
+    "mcts": MCTSAgent,
 }
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)

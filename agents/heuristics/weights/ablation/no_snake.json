@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "source": "cma-es",
+    "command": "python -m agents.heuristics.tune --mode single --out ablation/no_snake --cma-seed 1 --drop snake --games 64 --iters 40",
+    "mode": "single",
+    "features": [
+      "empty",
+      "mono",
+      "smooth",
+      "corner",
+      "merge"
+    ],
+    "tuned_phases": [],
+    "player": "1ply",
+    "dev_seeds": [
+      0,
+      63
+    ],
+    "init": "untuned",
+    "sigma0": 0.5,
+    "popsize": 8,
+    "cma_seed": 1,
+    "iters": 40,
+    "note": "dev_mean_score is the best of many candidates on the tuning seeds, so it is optimistic; report numbers come from eval.run on the test seeds.",
+    "init_dev_mean_score": 12413.3,
+    "dev_mean_score": 20363.4,
+    "generations": 40,
+    "improved_on_init": true
+  },
+  "weights": {
+    "empty": 0.710813,
+    "mono": 0.215768,
+    "smooth": 0.053051,
+    "corner": 1.0,
+    "merge": 0.727421
+  }
+}

@@ -20,6 +20,8 @@ env/
 # Project outputs
 results/
 weights/
+# Exception: the heuristic weight files are a few hundred bytes each and are versioned.
+!agents/heuristics/weights/
 logs/
 *.log
 runs/

@@ -23,6 +23,7 @@ from typing import Callable, Dict, List
 
 from agents.base import Agent
 from agents.baselines import GreedyAgent, RandomAgent
+from agents.expectimax.search import ExpectimaxAgent
 from agents.heuristics import heuristic_agents
 from engine.game import Game
 
@@ -31,6 +32,22 @@ AGENTS: Dict[str, Callable[[], Agent]] = {
     "greedy": GreedyAgent,
     **heuristic_agents(),
 }
+
+HEUR_KEY = "heuristic"   # P2's tuned evaluator
+
+
+def _heuristic_evaluator():
+    # Reuse P2's evaluator by taking it from P2's own registered agent
+    return heuristic_agents()[HEUR_KEY]().evaluator
+
+
+def _expectimax(depth, **kw):
+    name = kw.pop("name", f"expectimax-d{depth}")
+    return lambda: ExpectimaxAgent(_heuristic_evaluator(), depth=depth, name=name, **kw)
+
+
+AGENTS["expectimax-d1"] = _expectimax(1)
+AGENTS["expectimax-d2"] = _expectimax(2)
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)
 

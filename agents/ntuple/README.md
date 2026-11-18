@@ -45,12 +45,12 @@ single-threaded.
   | first 1,000 games | ~600 | ~530 |
   | around 10,000 games | ~330 | ~1,230 |
   | around 50,000 games | ~160 | ~2,100 |
+  | around 1,000,000 games | ~80 | ~5,400 |
 
   50,000 games took 221 s for plain (157–221 s across the four configurations).
-- **Estimate for a long run:** roughly **1–3 hours for 500,000 games** and 3–6 hours for
-  1,000,000. This is an extrapolation: it depends on how long games get, so watch the
-  `games_per_s` column.
-- **Benchmarking:** 1,000 games with `eval.run` took about 2.5 minutes per configuration.
+- **Long run:** 1,000,000 plain games took **3h00m** (10,825 s).
+- **Benchmarking:** 1,000 games with `eval.run` took about 2.5 minutes for the 50k weights
+  and about 7 minutes for the 1M weights (their games are longer).
 
 ### 1. Long overnight run (best configuration: plain)
 
@@ -101,25 +101,27 @@ the command, the commit (`git rev-parse --short HEAD`) and the machine (CONTRIBU
 `weights/` is git-ignored: never commit `.ntw` files. Give the file a descriptive name and
 attach it to a release. GitHub allows up to 2 GB per file.
 
-```bash
-cp weights/ntuple/long/latest.ntw ntuple-plain-1M.ntw
-sha256sum ntuple-plain-1M.ntw            # PowerShell: Get-FileHash ntuple-plain-1M.ntw
+**Published:** `ntuple-v1-1m` holds the 1M-game plain weights (`ntuple-plain-1m.ntw`), the
+current weights to use. `ntuple-v0.1-50k` holds the 50k-game plain weights.
 
-gh release create ntuple-v1 ntuple-plain-1M.ntw \
-    --target main \
+```bash
+gh release download ntuple-v1-1m --repo Dhrithi-sh/solver-65536 --pattern "ntuple-plain-1m.ntw" --dir weights/ntuple
+python -m eval.run --agent ntuple --games 100 --seed0 0 --weights weights/ntuple/ntuple-plain-1m.ntw
+```
+
+To publish a new set of weights:
+
+```bash
+cp weights/ntuple/long/latest.ntw ntuple-plain-1m.ntw
+sha256sum ntuple-plain-1m.ntw            # PowerShell: Get-FileHash ntuple-plain-1m.ntw
+
+gh release create ntuple-v1-1m ntuple-plain-1m.ntw \
+    --target <commit> \
     --title "N-tuple weights v1 (plain, 1M games)" \
-    --notes "1-ply n-tuple TD(0), 4x6-tuples x 8 symmetries, 1 stage, alpha 0.1, seed 10000000,
-1,000,000 training games, trained at commit <hash>. sha256: <hash>.
-Dev-seed benchmark (0-999): <paste eval.run summary>. Use: --weights ntuple-plain-1M.ntw"
+    --notes-file notes.md                # config, games, time, commit, sha256, eval.run results
 ```
 
-Use `--target main` once this PR is merged; before that, use `--target p5-ntuple`.
-Teammates download it with:
-
-```bash
-gh release download ntuple-v1 --pattern "*.ntw" --dir weights/ntuple
-python -m eval.run --agent ntuple --games 100 --seed0 0 --weights weights/ntuple/ntuple-plain-1M.ntw
-```
+Point `--target` at the commit the weights were trained on.
 
 Alternatively, copy it to `weights/ntuple/latest.ntw`, or set `NTUPLE_WEIGHTS`, so no flag is
 needed.
@@ -129,8 +131,12 @@ needed.
 ```bash
 pip install matplotlib                     # not in requirements.txt (keeps CI light)
 python scripts/plot_ntuple.py              # every run in weights/ntuple/compare
-python scripts/plot_ntuple.py weights/ntuple/compare/plain weights/ntuple/long --label long=plain-1M
+python scripts/plot_ntuple.py weights/ntuple/long weights/ntuple/compare/optimistic \
+    weights/ntuple/compare/multistage weights/ntuple/compare/both --label "long=plain (1M)"
 ```
+
+The 50k plain run isn't drawn separately. It is the same seed and configuration, so its
+curve is the first 50,000 games of the 1M curve (the logs match row for row).
 
 This writes `results/plots/ntuple_mean_score.png` (mean score vs games trained, one line per
 run) and `results/plots/ntuple_reach.png` (2048 / 8192 / 16384 reach rate vs games trained).
@@ -152,7 +158,7 @@ and use any of the three options above.
 ```python
 from agents.ntuple.agent import NTupleEvaluator
 
-ev = NTupleEvaluator("weights/ntuple/run1/latest.ntw")   # or NTupleEvaluator() to use $NTUPLE_WEIGHTS
+ev = NTupleEvaluator("weights/ntuple/ntuple-plain-1m.ntw")   # or NTupleEvaluator() to use $NTUPLE_WEIGHTS
 value = ev.evaluate(board)    # board = engine 4x4 list of tile values; returns float
 ```
 
@@ -257,18 +263,29 @@ all-zero weights file, so the shared agent tests run in CI without trained weigh
 
 All rows: `eval.run` on dev seeds 0–999 (1,000 games) unless noted, same machine as above.
 
-| Run | Training games | Mean score | Median | Reach 2048 | Reach 4096 | Reach 8192 |
-|-----|---------------:|-----------:|-------:|-----------:|-----------:|-----------:|
-| plain | 50,000 | **51,902** | 49,942 | **85.0%** | **50.7%** | **3.2%** |
-| optimistic (V = 50,000) | 50,000 | 48,228 | 44,466 | 88.1% | 46.4% | 0.9% |
-| multistage (split at 2048) | 50,000 | 37,342 | 36,358 | 80.5% | 18.5% | 0.1% |
-| both | 50,000 | 31,959 | 32,526 | 82.6% | 5.7% | 0.0% |
-| plain, seeds 0–99 only | 10,000 | 24,353 | 22,496 | 48% | 4% | 0% |
-| greedy baseline, seeds 0–99 | — | 3,297 | 3,210 | 0% | 0% | 0% |
+| Run | Training games | Mean score | Median | Reach 2048 | Reach 4096 | Reach 8192 | Reach 16384 |
+|-----|---------------:|-----------:|-------:|-----------:|-----------:|-----------:|------------:|
+| **plain (`ntuple-v1-1m`)** | 1,000,000 | **126,697** | **143,554** | **96.3%** | **90.9%** | **70.7%** | **2.1%** |
+| plain (`ntuple-v0.1-50k`) | 50,000 | 51,902 | 49,942 | 85.0% | 50.7% | 3.2% | 0.0% |
+| optimistic (V = 50,000) | 50,000 | 48,228 | 44,466 | 88.1% | 46.4% | 0.9% | 0.0% |
+| multistage (split at 2048) | 50,000 | 37,342 | 36,358 | 80.5% | 18.5% | 0.1% | 0.0% |
+| both | 50,000 | 31,959 | 32,526 | 82.6% | 5.7% | 0.0% | 0.0% |
+| plain, seeds 0–99 only | 10,000 | 24,353 | 22,496 | 48% | 4% | 0% | 0% |
+| greedy baseline, seeds 0–99 | — | 3,297 | 3,210 | 0% | 0% | 0% | 0% |
 
-The four 50k rows come from `scripts/ntuple_compare.sh` (commit `4d613ad`; same seed and
-alpha, 50,000 games each). Plain already meets the brief's ≥ 80% reach-2048 target on the
-dev seeds.
+No run reached 32,768 or 65,536.
+
+- **1M row:** training command as in section 1, trained at commit `1db1e03` in 3h00m.
+  - Benchmark speed: 0.0097 ms/move, versus 0.0086 for the 50k weights.
+  - Best game: 322,080 points.
+  - Max tiles: 8192 in 686 games, 16384 in 21. Games average 5,315 moves.
+- **50k rows:** from `scripts/ntuple_compare.sh` (commit `4d613ad`; same seed and alpha,
+  50,000 games each).
+
+Plain already met the brief's ≥ 80% reach-2048 target at 50k games. At 1M it reaches 8192
+in 71% of games. The tables index exponents up to 15 (32,768), so 32,768+ boards are
+represented, but 1-ply play rarely gets past 16,384. Pushing toward 65,536 needs search on
+top of this evaluator (P3/P7).
 
 How to read the comparison:
 - **Optimistic init reaches 2048 slightly more often but scores less.** It's a different
@@ -285,7 +302,8 @@ Training curves: `python scripts/plot_ntuple.py`.
 - [x] 4 x 6-tuple network with all 8 board symmetries (rotations + reflections)
 - [x] TD(0) afterstate learning
 - [x] Save/load weights; register a greedy-on-value agent in `eval/run.py`
-- [ ] Long training run; publish weights on GitHub Releases
+- [x] Long training run (1M games); weights on GitHub Releases (`ntuple-v1-1m`)
+- [ ] Final numbers on the test seeds 100000–100999
 - [x] Multi-stage weights (`--stages`, `--stage-tile`)
 - [x] Optimistic initialisation (`--init-value`)
 - [x] 50k-game comparison run (`scripts/ntuple_compare.sh`) and its results table

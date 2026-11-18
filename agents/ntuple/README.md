@@ -24,18 +24,116 @@ python -u -m agents.ntuple.train --games 10000 --alpha 0.1 --seed 10000000 \
 python -m eval.run --agent ntuple --games 100 --seed0 0 --weights weights/ntuple/run1/latest.ntw
 ```
 
-Long overnight run (Ctrl+C saves a checkpoint; rerun the same command to continue):
+Training writes `train_log.csv` in `--out`, one row per `--log-every` games, with the mean
+score, max score, mean moves, reach counts and rates for 2048–32768, elapsed seconds and
+games/sec. That log is for learning curves only. Numbers for the report come from `eval.run`.
+
+## Running the real experiments
+
+### Resources (measured on this machine)
+
+Machine: AMD Ryzen laptop, 12 threads, Windows 11, Python 3.14, numba 0.68.1. Training is
+single-threaded.
+
+- **Memory:** about **270 MB per stage** (268 MB of tables). Plain = 1 stage ≈ 270 MB;
+  `--stages 2` ≈ 540 MB. Add about 10 MB for buffers. Checkpoints are the same size on disk.
+- **Speed:** about **400,000 moves/sec**. Games/sec falls as the agent improves, because
+  better games last longer:
+
+  | point in training | games/sec | mean moves per game |
+  |---|---|---|
+  | first 1,000 games | ~600 | ~530 |
+  | around 10,000 games | ~330 | ~1,230 |
+  | around 50,000 games | ~160 | ~2,100 |
+
+  50,000 games took 221 s for plain (157–221 s across the four configurations).
+- **Estimate for a long run:** roughly **1–3 hours for 500,000 games** and 3–6 hours for
+  1,000,000. This is an extrapolation: it depends on how long games get, so watch the
+  `games_per_s` column.
+- **Benchmarking:** 1,000 games with `eval.run` took about 2.5 minutes per configuration.
+
+### 1. Long overnight run (best configuration: plain)
+
+In the 50k-game comparison below, the plain configuration was best, so the long run uses
+no `--stages` and no `--init-value`. Run it from the repo root:
 
 ```bash
 python -u -m agents.ntuple.train --games 1000000 --alpha 0.1 --seed 10000000 \
-    --out weights/ntuple/run1 --checkpoint-every 10000 --log-every 1000 \
-    --resume weights/ntuple/run1/latest.ntw
+    --out weights/ntuple/long --checkpoint-every 10000 --log-every 1000 2>&1 | tee -a weights/ntuple/long.txt
 ```
 
-Leave out `--resume` the first time. Training writes `train_log.csv` in `--out`, one row
-per `--log-every` games, with the mean score, max score, mean moves, reach counts and rates
-for 2048–32768, elapsed seconds and games/sec. That log is for learning curves only. Numbers
-for the report come from `eval.run`.
+- **Interrupted, crashed or rebooted:** Ctrl+C saves a checkpoint first. Continue with the
+  same command plus `--resume`; the result is identical to an uninterrupted run:
+
+  ```bash
+  python -u -m agents.ntuple.train --games 1000000 --alpha 0.1 --seed 10000000 \
+      --out weights/ntuple/long --checkpoint-every 10000 --log-every 1000 \
+      --resume weights/ntuple/long/latest.ntw 2>&1 | tee -a weights/ntuple/long.txt
+  ```
+- **Starting from an existing run:** add `--resume weights/ntuple/compare/plain/latest.ntw`
+  to the first command. That continues the 50k-game plain run instead of starting over (same
+  seed and RNG stream).
+- **Checkpoints:** only `latest.ntw` is kept, overwritten every 10,000 games. With
+  `--keep-checkpoints` each one is another 268 MB, so use something like
+  `--checkpoint-every 100000`.
+- **Progress:** in a second terminal, `tail -f weights/ntuple/long.txt`. Plot the curve any
+  time with `python scripts/plot_ntuple.py weights/ntuple/long`.
+
+### 2. Benchmark on the shared seeds
+
+Tune and compare on the **dev seeds 0–999**. Use the **test seeds 100000–100999** only for
+the final numbers in the report.
+
+```bash
+# dev set
+python -m eval.run --agent ntuple --games 1000 --seed0 0 --weights weights/ntuple/long/latest.ntw
+
+# final test set (once, at the end)
+python -m eval.run --agent ntuple --games 1000 --seed0 100000 --weights weights/ntuple/long/latest.ntw \
+    --out-dir results/test
+```
+
+Each run writes `results/<agent>.jsonl` (or the `--out-dir`). When you post numbers, give
+the command, the commit (`git rev-parse --short HEAD`) and the machine (CONTRIBUTING.md).
+
+### 3. Publish the weights (GitHub Release, not git)
+
+`weights/` is git-ignored: never commit `.ntw` files. Give the file a descriptive name and
+attach it to a release. GitHub allows up to 2 GB per file.
+
+```bash
+cp weights/ntuple/long/latest.ntw ntuple-plain-1M.ntw
+sha256sum ntuple-plain-1M.ntw            # PowerShell: Get-FileHash ntuple-plain-1M.ntw
+
+gh release create ntuple-v1 ntuple-plain-1M.ntw \
+    --target main \
+    --title "N-tuple weights v1 (plain, 1M games)" \
+    --notes "1-ply n-tuple TD(0), 4x6-tuples x 8 symmetries, 1 stage, alpha 0.1, seed 10000000,
+1,000,000 training games, trained at commit <hash>. sha256: <hash>.
+Dev-seed benchmark (0-999): <paste eval.run summary>. Use: --weights ntuple-plain-1M.ntw"
+```
+
+Use `--target main` once this PR is merged; before that, use `--target p5-ntuple`.
+Teammates download it with:
+
+```bash
+gh release download ntuple-v1 --pattern "*.ntw" --dir weights/ntuple
+python -m eval.run --agent ntuple --games 100 --seed0 0 --weights weights/ntuple/ntuple-plain-1M.ntw
+```
+
+Alternatively, copy it to `weights/ntuple/latest.ntw`, or set `NTUPLE_WEIGHTS`, so no flag is
+needed.
+
+### 4. Plots
+
+```bash
+pip install matplotlib                     # not in requirements.txt (keeps CI light)
+python scripts/plot_ntuple.py              # every run in weights/ntuple/compare
+python scripts/plot_ntuple.py weights/ntuple/compare/plain weights/ntuple/long --label long=plain-1M
+```
+
+This writes `results/plots/ntuple_mean_score.png` (mean score vs games trained, one line per
+run) and `results/plots/ntuple_reach.png` (2048 / 8192 / 16384 reach rate vs games trained).
 
 ## Which weights file is used
 
@@ -150,26 +248,45 @@ floats can be read from C++ with one `fread` after skipping the header.
 | `agent.py` | `NTupleEvaluator`, `NTupleAgent`, weights lookup |
 | `_jit.py` | numba import with a pure-Python fallback |
 | `../../scripts/ntuple_compare.sh` | trains and benchmarks plain / multistage / optimistic / both |
+| `../../scripts/plot_ntuple.py` | learning-curve PNGs from training CSVs |
 
 Tests: `tests/test_ntuple_*.py`. `tests/conftest.py` points `NTUPLE_WEIGHTS` at an
 all-zero weights file, so the shared agent tests run in CI without trained weights.
 
 ## Results so far
 
-| Run | Command | Mean score | Reach 2048 | Reach 4096 |
-|-----|---------|-----------:|-----------:|-----------:|
-| 10k training games | `python -m eval.run --agent ntuple --games 100 --seed0 0 --weights weights/ntuple/run1/latest.ntw` | 24,353 | 48% | 4% |
-| greedy baseline | `python -m eval.run --agent greedy --games 100 --seed0 0` | 3,297 | 0% | 0% |
+All rows: `eval.run` on dev seeds 0–999 (1,000 games) unless noted, same machine as above.
 
-These are early numbers from the dev seeds; the target is ≥ 80% reach-2048 after the long
-run. The commit, command and machine for each reported number go in the PR.
+| Run | Training games | Mean score | Median | Reach 2048 | Reach 4096 | Reach 8192 |
+|-----|---------------:|-----------:|-------:|-----------:|-----------:|-----------:|
+| plain | 50,000 | **51,902** | 49,942 | **85.0%** | **50.7%** | **3.2%** |
+| optimistic (V = 50,000) | 50,000 | 48,228 | 44,466 | 88.1% | 46.4% | 0.9% |
+| multistage (split at 2048) | 50,000 | 37,342 | 36,358 | 80.5% | 18.5% | 0.1% |
+| both | 50,000 | 31,959 | 32,526 | 82.6% | 5.7% | 0.0% |
+| plain, seeds 0–99 only | 10,000 | 24,353 | 22,496 | 48% | 4% | 0% |
+| greedy baseline, seeds 0–99 | — | 3,297 | 3,210 | 0% | 0% | 0% |
+
+The four 50k rows come from `scripts/ntuple_compare.sh` (commit `4d613ad`; same seed and
+alpha, 50,000 games each). Plain already meets the brief's ≥ 80% reach-2048 target on the
+dev seeds.
+
+How to read the comparison:
+- **Optimistic init reaches 2048 slightly more often but scores less.** It's a different
+  trade-off, not clearly better, at this length.
+- **The 2048 multi-stage split hurts at 50k games.** Stage 2 starts as a copy of stage 1 and
+  then learns only from the part of each game past 2048. Each network sees less data, and
+  50k games isn't enough to make up for it. This tests a split at 2048, not Yeh et al.'s
+  16,384 split.
+- **Combining them is worst.**
+
+Training curves: `python scripts/plot_ntuple.py`.
 
 ## TODO
 - [x] 4 x 6-tuple network with all 8 board symmetries (rotations + reflections)
 - [x] TD(0) afterstate learning
 - [x] Save/load weights; register a greedy-on-value agent in `eval/run.py`
 - [ ] Long training run; publish weights on GitHub Releases
-- [ ] Learning curves (score and reach rates vs training games) with P8's plots
 - [x] Multi-stage weights (`--stages`, `--stage-tile`)
 - [x] Optimistic initialisation (`--init-value`)
-- [ ] Overnight comparison run (`scripts/ntuple_compare.sh`) and its results table
+- [x] 50k-game comparison run (`scripts/ntuple_compare.sh`) and its results table
+- [x] Learning-curve plots (`scripts/plot_ntuple.py`)

@@ -1,120 +1,186 @@
-# P6: CNN + Double DQN
+# \# P6: Deep reinforcement learning
 
-A small deep reinforcement-learning agent that uses the existing engine unchanged.
-The shared interface is `choose_move(game)`, not `choose_move(board)`.
+# 
 
-## Run from the repository root
+# For my part, I used a CNN with Double DQN to learn how to play 2048. It uses the shared game engine and the `choose\_move(game)` interface.
 
-```bash
-python -m pip install -r requirements.txt
-python -m pip install -r agents/deeprl/requirements-deeprl.txt
-python -m pytest tests agents/deeprl/test_deeprl.py
-```
+# 
 
-Quick check that training runs (this does NOT produce a strong agent):
+# \## How it works
 
-```bash
-python -m agents.deeprl.train --steps 2000 --warmup 128 --epsilon-steps 1600 --checkpoint weights/dqn_smoke.pt --log logs/dqn_smoke.csv
-```
+# 
 
-A first real training run on CPU:
+# The board is encoded using 18 channels: one for empty cells, 16 for tiles from 2 to 65,536, and one for larger tiles.
 
-```bash
-python -m agents.deeprl.train --steps 100000 --checkpoint weights/dqn.pt
-```
+# 
 
-Or use a time budget; the run stops at whichever limit comes first:
+# The CNN gives a value to each of the four moves. During evaluation, the agent picks the legal move with the highest value.
 
-```bash
-python -m agents.deeprl.train --steps 1000000 --minutes 30 --checkpoint weights/dqn.pt
-```
+# 
 
-If your PyTorch installation supports an NVIDIA GPU, add `--device cuda`.
-For this tiny network CPU may be competitive: measure rather than assuming.
-Training saves every 5,000 steps and on normal completion or Ctrl+C.
-Repeated commands start fresh: optimizer/replay resumption is not implemented.
-Default seeds start at 1,000,000; confirm that P8 excludes this range from testing.
+# Training uses a replay buffer and a target network. I also used all eight rotations and reflections of the board for augmentation, with the actions and legal-move masks transformed along with them. The reward is the merge score divided by 128, and the discount factor is 0.99.
 
-## P8 registration (two additions)
+# 
 
-Only `agents/deeprl/` was changed, in accordance with folder ownership.
-Ask P8 to add the following in `eval/run.py`, after the existing imports and registry:
+# The environment has Gym-style reset and step methods, but it is not registered with Gymnasium.
 
-```python
-from agents.deeprl import DQNAgent
-AGENTS["dqn"] = DQNAgent
-```
+# 
 
-The model defaults to `weights/dqn.pt`, or the path in `DQN_CHECKPOINT`.
-Then run the actual shared harness:
+# \## Setup
 
-```bash
-python -m eval.run --agent dqn --games 10 --seed0 0
-python -m eval.replay results/dqn.jsonl --index 0
-```
+# 
 
-Those seeds are a development example, not an agreed final test set. Use P8's final
-seed ranges when set. Give the commit, machine, checkpoint and command with results.
-DQN deliberately fails if its checkpoint is missing instead of silently benchmarking
-an untrained random network. Consequently, P8 should only register DQN in environments
-with PyTorch and a checkpoint; unconditional registration also affects the generic CI tests.
+# Run these commands from the project root, using your Python environment:
 
-For an interactive integration check without editing anyone else's folder:
+# 
 
-```python
-from agents.deeprl import DQNAgent
-from engine.game import Game
-agent = DQNAgent("weights/dqn.pt")
-game = Game(seed=0)
-move = agent.choose_move(game)
-print(move, agent.move_scores(game))
-```
+# ```powershell
 
-## What the implementation does
+# python -m pip install -r requirements.txt
 
-- Gym-style `reset` and `step` return one-hot observations and an action mask.
-  This is a lightweight wrapper, not a registered Gymnasium environment.
-- Input shape is **18 x 4 x 4**: empty, exponents 1 through 16, then an overflow
-  channel for 131,072 and above. The starter TODO's 16 channels could not represent
-  65,536 separately. Exponent 16 has its own channel here.
-- Two convolution layers (32 and 64 filters), then 128 hidden units and four Q values.
-- Epsilon-greedy exploration selects only legal moves. Evaluation is greedy and masked.
-- Replay buffer, a separate target network, Double DQN targets, Huber loss and gradient clipping.
-- Raw merge reward divided by 128; gamma 0.99. This is a discounted-score objective.
-  No heuristic reward bonuses or terminal penalties are added.
-- Replay augmentation uniformly samples from all eight square symmetries and transforms
-  both boards, the action, and the next-state legal mask together.
-- Terminal transitions have zero bootstrap value. Models train every four game moves;
-  target parameters copy every 250 gradient updates.
-- `move_scores(game)` exposes masked Q estimates for P8's viewer. These are predictions,
-  not success probabilities. Neither agent method mutates the supplied game.
+# python -m pip install -r agents/deeprl/requirements-deeprl.txt
 
-## Fair comparison and limits
+# ```
 
-Train an augmented and an unaugmented model from scratch with the same seed and step
-budget (`--no-augmentation` disables it). Store them under different checkpoint/log names.
-Compare them through P8's harness on the same held-out seeds.
+# 
 
-For P5 comparison, agree on either equal environment interactions or equal wall-clock
-budget on the same hardware; these are distinct experiments. Checkpoint metadata records
-steps, updates, elapsed seconds and configuration. Training CSV scores include exploration
-and must not be used as the reported evaluation results.
+# \## Training
 
-Same seeds reproduce a game's spawns given the SAME sequence of moves. Different agents
-usually produce different boards and empty-cell sets, so same-seed games do not guarantee
-identical spawned coordinates. They provide paired seeded evaluation, not identical boards.
+# 
 
-Late-game boards can be supplied via `GameEnv.reset(seed, board)` or `Game(seed, board)`.
-P8 still needs to provide the official saved boards and late-game harness. Success at 65,536
-has not been established by this implementation or its smoke test. Reaching that tile is
-not guaranteed; a short DQN run should be presented as an initial deep RL baseline.
+# For a new 100,000-move training run:
 
-## Files
+# 
 
-- `model.py`: encoding, CNN, board/action symmetries.
-- `env.py`: wrapper around the shared engine.
-- `train.py`: self-play and learning.
-- `agent.py`: checkpoint loading and shared agent interface.
-- `test_deeprl.py`: large tiles, all symmetry/action mappings, wrapper and agent contracts.
+# ```powershell
 
-No engine, evaluator, top-level requirements or teammate-owned files were modified.
+# python -m agents.deeprl.train --steps 100000 --checkpoint weights/dqn.pt --log logs/dqn\_training.csv
+
+# ```
+
+# 
+
+# You can also add `--minutes 5` to set a time limit. Training stops when either the step limit or time limit is reached.
+
+# 
+
+# The model is saved every 5,000 steps, at the end, and when training is stopped with Ctrl+C. Running the command again starts a new model; it does not resume the previous training.
+
+# 
+
+# \## Evaluation
+
+# 
+
+# DQN is registered in the shared evaluation harness. Set the checkpoint path before running it:
+
+# 
+
+# ```powershell
+
+# $env:DQN\_CHECKPOINT = "weights/dqn\_500k.pt"
+
+# python -m eval.run --agent dqn --games 100 --seed0 100 --out-dir results/check100
+
+# ```
+
+# 
+
+# The checkpoint must be downloaded separately. If no path is set, the agent looks for `weights/dqn.pt`. It gives an error if the file is missing.
+
+# 
+
+# These are the seeds used for my development evaluation. P8 will confirm the final team evaluation setup.
+
+# 
+
+# \## Results
+
+# 
+
+# My longer run completed 302,560 training moves. Its checkpoint is called `dqn\_500k.pt`, but it did not finish 500,000 moves.
+
+# 
+
+# On 100 games with seeds 100–199:
+
+# 
+
+# | Agent | Mean score |
+
+# |---|---:|
+
+# | Random | 1025.4 |
+
+# | Greedy | 3003.2 |
+
+# | DQN | 2593.8 |
+
+# 
+
+# DQN beat random but did not beat greedy. Its highest tile was 512.
+
+# 
+
+# I also trained DQN and P5's n-tuple agent from scratch for approximately five minutes each on the same laptop. On 100 evaluation games with seeds 100000–100099:
+
+# 
+
+# | Agent | Mean score | Highest tile |
+
+# |---|---:|---:|
+
+# | DQN | 1289.4 | 256 |
+
+# | N-tuple | 47972.3 | 8192 |
+
+# 
+
+# N-tuple performed much better in this experiment. This compares the implementations under the same time budget, rather than the same number of training moves. Each result is from one training run.
+
+# 
+
+# `train\_ntuple\_timed.py` runs the timed P5 training. It requires P5's n-tuple implementation and its dependencies, which are not included in this P6 change.
+
+# 
+
+# \## Tests
+
+# 
+
+# ```powershell
+
+# python -m pytest tests agents/deeprl/test\_deeprl.py
+
+# ```
+
+# 
+
+# All 42 tests passed locally. The shared DQN tests create a temporary model, so they do not need my trained checkpoint. Tests requiring PyTorch are skipped when it is unavailable.
+
+# 
+
+# \## Files
+
+# 
+
+# \- `model.py`: CNN, board encoding and symmetry transformations.
+
+# \- `env.py`: wrapper around the shared game engine.
+
+# \- `train.py`: DQN training.
+
+# \- `agent.py`: loads a checkpoint and chooses moves.
+
+# \- `train\_ntuple\_timed.py`: timed training wrapper for P5.
+
+# \- `test\_deeprl.py`: tests for the P6 implementation.
+
+# 
+
+# The trained models, logs, graphs and detailed report are shared separately.
+
+# 
+
+# My DQN has not reached 65,536. The late-game evaluation still needs P8's saved boards and harness. Symmetry augmentation is implemented, but I have not separately measured its effect against training without augmentation.
+

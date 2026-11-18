@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2048 AI Replay Viewer</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 30px 15px;
+            background: #faf8ef;
+            color: #51483f;
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+
+        h1 {
+            margin-bottom: 5px;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            color: #887f75;
+            margin-bottom: 25px;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        .stat {
+            background: #bbada0;
+            color: white;
+            padding: 12px 22px;
+            border-radius: 7px;
+            min-width: 110px;
+        }
+
+        .stat span {
+            display: block;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .stat strong {
+            font-size: 21px;
+        }
+
+        #board {
+            background: #bbada0;
+            padding: 9px;
+            border-radius: 9px;
+            width: min(90vw, 420px);
+            aspect-ratio: 1;
+            margin: 0 auto 20px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            gap: 9px;
+        }
+
+        .cell {
+            background: rgba(238, 228, 218, 0.35);
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: clamp(18px, 5vw, 30px);
+            font-weight: bold;
+            position: relative;
+            transition: transform 0.15s ease;
+        }
+
+        @keyframes mergeGlow {
+            0% {
+                transform: scale(1.15);
+                box-shadow: 0 0 20px 6px #00e5ff, 0 0 35px 10px #2979ff;
+            }
+            100% {
+                transform: scale(1.05);
+                box-shadow: 0 0 12px 3px #00e5ff, 0 0 20px 6px #2979ff;
+            }
+        }
+
+        .merged {
+            outline: 4px solid #00e5ff;
+            z-index: 2;
+            animation: mergeGlow 0.32s ease-out forwards;
+        }
+
+        .tile-2 { background: #eee4da; }
+        .tile-4 { background: #ede0c8; }
+        .tile-8 { background: #f2b179; color: white; }
+        .tile-16 { background: #f59563; color: white; }
+        .tile-32 { background: #f67c5f; color: white; }
+        .tile-64 { background: #f65e3b; color: white; }
+        .tile-128 { background: #edcf72; color: white; }
+        .tile-256 { background: #edcc61; color: white; }
+        .tile-512 { background: #edc850; color: white; }
+        .tile-1024 { background: #edc53f; color: white; }
+        .tile-2048 { background: #edc22e; color: white; }
+        .tile-super { background: #3c3a32; color: white; }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+
+        button {
+            border: none;
+            background: #8f7a66;
+            color: white;
+            padding: 12px 18px;
+            border-radius: 6px;
+            font-size: 15px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #6f5d4b;
+        }
+
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        input[type="range"] {
+            width: min(90vw, 420px);
+            cursor: pointer;
+        }
+
+        #status {
+            color: #887f75;
+            margin-top: 12px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>2048 AI Replay Viewer</h1>
+    <p class="subtitle">Watch how an AI plays 2048</p>
+
+    <div class="stats">
+        <div class="stat">
+            <span>AI AGENT</span>
+            <strong id="agent">-</strong>
+        </div>
+
+        <div class="stat">
+            <span>SCORE</span>
+            <strong id="score">0</strong>
+        </div>
+
+        <div class="stat">
+            <span>MAX TILE</span>
+            <strong id="maxTile">0</strong>
+        </div>
+    </div>
+
+    <div id="board"></div>
+
+    <div id="status">Loading replay...</div>
+
+    <div class="controls">
+        <button id="first">|◀</button>
+        <button id="previous">◀ Previous</button>
+        <button id="play">▶ Play</button>
+        <button id="next">Next ▶</button>
+        <button id="last">▶|</button>
+    </div>
+
+    <p id="counter">Move 0 / 0</p>
+
+    <input type="range" id="timeline" min="0" value="0">
+
+    <script>
+        let replay;
+        let currentFrame = 0;
+        let timer = null;
+
+        const boardElement = document.getElementById("board");
+        const timeline = document.getElementById("timeline");
+
+        async function loadReplay() {
+            try {
+                const response = await fetch("replay_data.json?t=" + Date.now());
+
+                if (!response.ok) {
+                    throw new Error("Could not load replay_data.json");
+                }
+
+                replay = await response.json();
+
+                document.getElementById("agent").textContent =
+                    replay.agent.toUpperCase();
+
+                timeline.max = replay.frames.length - 1;
+
+                showFrame(0);
+            } catch (error) {
+                document.getElementById("status").textContent =
+                    error.message + ". Run a local web server from the project folder.";
+            }
+        }
+
+        function showFrame(index) {
+            currentFrame = Math.max(
+                0,
+                Math.min(index, replay.frames.length - 1)
+            );
+
+            const frame = replay.frames[currentFrame];
+            const merged = frame.merged || [];
+
+            boardElement.innerHTML = "";
+
+            frame.board.forEach((row, r) => {
+                row.forEach((value, c) => {
+                    const cell = document.createElement("div");
+                    cell.className = "cell";
+
+                    if (value > 0) {
+                        cell.textContent = value;
+                        cell.classList.add(value <= 2048 ? "tile-" + value : "tile-super");
+
+                        if (merged.some(pos => pos[0] === r && pos[1] === c)) {
+                            cell.classList.add("merged");
+                        }
+                    }
+
+                    boardElement.appendChild(cell);
+                });
+            });
+
+            document.getElementById("score").textContent = frame.score;
+            document.getElementById("maxTile").textContent = frame.max_tile;
+
+            document.getElementById("counter").textContent =
+                "Move " + currentFrame + " / " +
+                (replay.frames.length - 1);
+
+            const mergeNote = merged.length > 0
+                ? " (" + merged.length + " merge" + (merged.length > 1 ? "s" : "") + ")"
+                : "";
+
+            document.getElementById("status").textContent =
+                "Last move: " + frame.move + mergeNote;
+
+            timeline.value = currentFrame;
+
+            document.getElementById("previous").disabled =
+                currentFrame === 0;
+
+            document.getElementById("next").disabled =
+                currentFrame === replay.frames.length - 1;
+        }
+
+        function stopPlaying() {
+            clearInterval(timer);
+            timer = null;
+            document.getElementById("play").textContent = "▶ Play";
+        }
+
+        function nextFrame() {
+            if (currentFrame < replay.frames.length - 1) {
+                showFrame(currentFrame + 1);
+            } else {
+                stopPlaying();
+            }
+        }
+
+        document.getElementById("first").onclick = () => {
+            stopPlaying();
+            showFrame(0);
+        };
+
+        document.getElementById("previous").onclick = () => {
+            stopPlaying();
+            showFrame(currentFrame - 1);
+        };
+
+        document.getElementById("next").onclick = () => {
+            stopPlaying();
+            nextFrame();
+        };
+
+        document.getElementById("last").onclick = () => {
+            stopPlaying();
+            showFrame(replay.frames.length - 1);
+        };
+
+        document.getElementById("play").onclick = () => {
+            if (timer) {
+                stopPlaying();
+                return;
+            }
+
+            if (currentFrame === replay.frames.length - 1) {
+                showFrame(0);
+            }
+
+            document.getElementById("play").textContent = "⏸ Pause";
+
+            timer = setInterval(nextFrame, 350);
+        };
+
+        timeline.oninput = () => {
+            stopPlaying();
+            showFrame(Number(timeline.value));
+        };
+
+        loadReplay();
+    </script>
+
+</body>
+</html>

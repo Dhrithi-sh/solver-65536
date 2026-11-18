@@ -25,9 +25,15 @@ from agents.base import Agent
 from agents.baselines import GreedyAgent, RandomAgent
 from engine.game import Game
 
+def make_dqn_agent():
+    from agents.deeprl import DQNAgent
+    return DQNAgent()
+
+
 AGENTS: Dict[str, Callable[[], Agent]] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
+    "dqn": make_dqn_agent,
 }
 
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)

@@ -6,6 +6,24 @@ from engine.game import Game
 from eval.replay import replay
 from eval.run import AGENTS, main, play_game
 
+@pytest.fixture(autouse=True)
+def temporary_dqn_checkpoint(request, tmp_path, monkeypatch):
+    if getattr(request.node, "callspec", None) is None:
+        return
+    if request.node.callspec.params.get("name") != "dqn":
+        return
+
+    torch = pytest.importorskip("torch")
+    from agents.deeprl.model import QNetwork
+
+    torch.set_num_threads(1)
+    with torch.random.fork_rng():
+        torch.manual_seed(1)
+        model = QNetwork()
+
+    path = tmp_path / "test_dqn.pt"
+    torch.save({"model": model.state_dict()}, path)
+    monkeypatch.setenv("DQN_CHECKPOINT", str(path))
 
 @pytest.mark.parametrize("name", sorted(AGENTS))
 def test_agent_only_returns_legal_moves(name):

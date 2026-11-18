@@ -16,6 +16,10 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Build hybrid C++ search (P7)
+        run: |
+          pip install -r agents/hybrid/requirements.txt
+          python agents/hybrid/cpp/setup.py build_ext
       - name: Unit tests
         run: pytest
       - name: Benchmark (random, 10 games)

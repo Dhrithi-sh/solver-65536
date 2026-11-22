@@ -19,7 +19,6 @@ from agents.baselines import (
     MonteCarloAgent,
     RandomAgent,
 )
-from agents.deeprl.agent import DQNAgent
 from agents.heuristics import HeuristicEvaluator, heuristic_agents
 from agents.hybrid.registry import hybrid_agents
 from agents.ntuple.agent import make_ntuple_agent
@@ -48,6 +47,8 @@ def make_minimax_heuristic():
 
 
 def make_dqn_agent(weights: str | None = None) -> Agent:
+    from agents.deeprl.agent import DQNAgent
+
     return DQNAgent(checkpoint=weights)
 
 

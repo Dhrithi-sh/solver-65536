@@ -1,3 +1,9 @@
+[build-system]
+# pybind11 is needed only to BUILD the optional C++ extension (engine._cengine),
+# not to run the project, so it is not in [project].dependencies.
+requires = ["setuptools>=64", "wheel", "pybind11>=2.11"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "solver-65536"
 version = "0.1.0"
@@ -10,6 +16,8 @@ dev = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]
 include = ["engine*", "agents*", "eval*"]
+# engine/_core holds C++ sources, not Python code
+exclude = ["engine._core", "engine._core.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

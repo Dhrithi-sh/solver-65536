@@ -129,6 +129,40 @@ def play_and_learn(weights3, stage_exps, started, rng_state, alpha, afterstates,
     board = np.zeros(16, dtype=np.uint8)
     spawn_random(board, rng_state)
     spawn_random(board, rng_state)
+    return _play_and_learn_from(board, weights3, stage_exps, started, rng_state, alpha, afterstates, rewards)
+
+
+@njit(cache=True)
+def pick_start(pos_exps, game_offsets, rng_state):
+    """Uniform source game first, then a uniform position within it.
+
+    game_offsets[g]:game_offsets[g+1] are game g's rows in pos_exps. Returns the
+    chosen row index. Two draws from the training RNG (game, then position), so a
+    run stays reproducible from its seed. Modulo bias is < count / 2**32.
+    """
+    n_games = game_offsets.shape[0] - 1
+    g = next_u32(rng_state) % n_games
+    lo = game_offsets[g]
+    return lo + next_u32(rng_state) % (game_offsets[g + 1] - lo)
+
+
+@njit(cache=True)
+def play_and_learn_from_positions(weights3, stage_exps, started, rng_state, alpha, afterstates, rewards,
+                                  pos_exps, game_offsets):
+    """Like ``play_and_learn`` but start from a sampled saved position (no initial spawns).
+
+    Returns (score, max_exp, moves, start_row); score counts only rewards earned here.
+    """
+    row = pick_start(pos_exps, game_offsets, rng_state)
+    board = pos_exps[row].copy()
+    score, max_exp, n = _play_and_learn_from(board, weights3, stage_exps, started, rng_state, alpha,
+                                             afterstates, rewards)
+    return score, max_exp, n, row
+
+
+@njit(cache=True)
+def _play_and_learn_from(board, weights3, stage_exps, started, rng_state, alpha, afterstates, rewards):
+    """Play greedily from ``board`` (a state, before a move) to the end, then learn."""
     n = 0
     score = 0
     while True:
@@ -234,6 +268,47 @@ def save_checkpoint(net: StagedNetwork, out: Path, state: Dict, keep: bool) -> P
     return latest
 
 
+# ------------------------------------------------------------ start positions
+def load_start_positions(path: str | Path):
+    """Read a positions JSONL (scripts/extract_late_positions.py) for --start-positions.
+
+    Returns (pos_exps uint8[N, 16], game_offsets int64[G+1], rows, info). Rows are
+    grouped by source game (``game_id`` if present, else ``source_file``, else
+    ``source_seed``) in first-seen order; ``rows[i]`` is the original JSON object of
+    pos_exps[i]. ``info`` (path, sha256, counts) goes into the checkpoint metadata.
+    """
+    import hashlib
+    import json
+
+    from agents.ntuple.board import to_exponents
+
+    path = Path(path)
+    data = path.read_bytes()
+    groups: Dict[object, List[dict]] = {}
+    for line in data.decode("utf-8").splitlines():
+        if line.strip():
+            r = json.loads(line)
+            key = r.get("game_id", r.get("source_file", r.get("source_seed")))
+            groups.setdefault(key, []).append(r)
+    rows = [r for g in groups.values() for r in g]
+    if not rows:
+        raise ValueError(f"{path}: no positions")
+    pos_exps = np.stack([to_exponents(r["board"]) for r in rows]).astype(np.uint8)
+    game_offsets = np.zeros(len(groups) + 1, dtype=np.int64)
+    game_offsets[1:] = np.cumsum([len(g) for g in groups.values()])
+    for i, r in enumerate(rows):
+        if not np.any(legal_moves(pos_exps[i])):
+            raise ValueError(f"{path}: position {i} has no legal move")
+    info = {
+        "path": path.as_posix(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "n_positions": len(rows),
+        "n_games": len(groups),
+        "source_seeds": sorted({int(r["source_seed"]) for r in rows if "source_seed" in r}),
+    }
+    return pos_exps, game_offsets, rows, info
+
+
 # ---------------------------------------------------------------------- main
 def train(
     games: int,
@@ -248,18 +323,33 @@ def train(
     verbose: bool = True,
     stages: int = 1,
     stage_tiles: Optional[Sequence[int]] = None,
+    init_from: Optional[str | Path] = None,
+    start_positions: Optional[str | Path] = None,
 ) -> Dict:
     """Train until ``games`` games in total have been played (counting resumed ones).
 
     stages / stage_tiles: multi-stage TD. With stages=2 and stage_tiles=[16384],
         boards whose max tile is below 16,384 use network 1, the rest network 2.
     init_value: optimistic initialisation; every board's value starts here.
+    init_from: start a NEW run from this weights file (its stages, stage tiles,
+        init value and ``stages_started``), with fresh counters and RNG from ``seed``.
+        Unlike ``resume`` it ignores the file's training counters.
+    start_positions: JSONL of saved boards; every game starts from one of them
+        (uniform over source games, then over that game's positions, drawn from the
+        training RNG). The chosen row of each game is written to ``starts.csv``.
     Returns {"net", "rows", "games"}; rows are the CSV rows written this run.
     """
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     if stage_tiles is None:
         stage_tiles = [16384] if stages == 2 else []
+    if resume and init_from:
+        raise ValueError("use either resume or init_from, not both")
+
+    starts = None
+    if start_positions:
+        pos_exps, game_offsets, pos_rows, pos_info = load_start_positions(start_positions)
+        starts = (pos_exps, game_offsets)
 
     if resume:
         net = StagedNetwork.load(resume)
@@ -278,6 +368,25 @@ def train(
         seed = int(m.get("seed", seed))
         if verbose:
             print(f"resumed {resume}: {done:,} games, {_fmt_time(elapsed0)} trained", flush=True)
+        prev = m.get("start_positions")
+        prev_sha = prev.get("sha256") if prev else None
+        if prev_sha != (pos_info["sha256"] if starts else None):
+            raise ValueError(f"resume: --start-positions does not match the checkpoint's ({prev})")
+    elif init_from:
+        net = StagedNetwork.load(init_from)
+        if verbose and (net.n_stages != stages or net.stage_tiles != list(stage_tiles)):
+            print(f"note: using {init_from}'s {net.n_stages} stage(s) {net.stage_tiles}", flush=True)
+        src_meta = net.meta
+        started = np.array(src_meta.get("stages_started", [1] * net.n_stages), dtype=np.uint8)
+        init_value = float(src_meta.get("init_value", 0.0))
+        net.meta = {k: v for k, v in src_meta.items() if k.startswith("promoted_")}
+        net.meta["init_from"] = Path(init_from).as_posix()
+        done, elapsed0 = 0, 0.0
+        rng_state = make_rng(seed)
+        win_scores, win_exps, win_moves = [], [], []
+        if verbose:
+            print(f"init from {init_from}: stages={net.n_stages} {net.stage_tiles} "
+                  f"started={started.tolist()}", flush=True)
     else:
         net = StagedNetwork(stages, stage_tiles, init_value=init_value)
         started = np.zeros(stages, dtype=np.uint8)
@@ -288,6 +397,11 @@ def train(
     # On resume, --alpha from the command line wins (so it can be lowered later
     # in training); the seed, RNG state and init value come from the checkpoint.
     net.meta.update({"alpha": alpha, "seed": seed, "init_value": init_value})
+    if starts is not None:
+        net.meta["start_positions"] = pos_info
+        if verbose:
+            print(f"start positions: {pos_info['n_positions']:,} boards from {pos_info['n_games']} source games "
+                  f"({pos_info['path']}, sha256 {pos_info['sha256'][:12]})", flush=True)
 
     afterstates = np.zeros((MAX_MOVES, 16), dtype=np.uint8)
     rewards = np.zeros(MAX_MOVES, dtype=np.int64)
@@ -314,15 +428,32 @@ def train(
         staging = f" stages={net.n_stages} {net.stage_tiles}" if net.n_stages > 1 else ""
         print(f"training to {games:,} games | alpha={alpha} seed={seed} init={init_value}{staging} out={out}",
               flush=True)
+    starts_f = None
+    if starts is not None:
+        starts_path = out / "starts.csv"
+        new_starts = not starts_path.exists()
+        starts_f = starts_path.open("a", newline="", encoding="utf-8")
+        starts_w = csv.writer(starts_f)
+        if new_starts:
+            starts_w.writerow(["game", "row", "source_seed", "move_index", "game_id", "score", "max_tile", "moves"])
     with log_path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         if new_log:
             writer.writeheader()
         try:
             while done < games:
-                score, max_exp, n = play_and_learn(
-                    net.weights, net.stage_exps, started, rng_state, alpha, afterstates, rewards
-                )
+                if starts is None:
+                    score, max_exp, n = play_and_learn(
+                        net.weights, net.stage_exps, started, rng_state, alpha, afterstates, rewards
+                    )
+                else:
+                    score, max_exp, n, row_i = play_and_learn_from_positions(
+                        net.weights, net.stage_exps, started, rng_state, alpha, afterstates, rewards,
+                        starts[0], starts[1]
+                    )
+                    r = pos_rows[row_i]
+                    starts_w.writerow([done + 1, int(row_i), r.get("source_seed"), r.get("move_index"),
+                                       r.get("game_id"), int(score), 1 << int(max_exp), int(n)])
                 done += 1
                 win_scores.append(int(score))
                 win_exps.append(int(max_exp))
@@ -347,6 +478,9 @@ def train(
                 print(f"\ninterrupted at {done:,} games; saving checkpoint...", flush=True)
             save_checkpoint(net, out, state(), keep_checkpoints)
             raise
+        finally:
+            if starts_f is not None:
+                starts_f.close()
     if done % checkpoint_every != 0 or done == start_done:
         path = save_checkpoint(net, out, state(), keep_checkpoints)
         if verbose:
@@ -369,6 +503,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--stage-tile", type=int, nargs="+", default=None,
                    help="tile(s) that start the next stage; default 16384 for --stages 2")
     p.add_argument("--keep-checkpoints", action="store_true", help="also keep numbered ckpt_<N>.ntw files")
+    p.add_argument("--init-from", default=None,
+                   help="start a new run from this .ntw (e.g. a promoted 2-stage file); fresh counters/RNG")
+    p.add_argument("--start-positions", default=None,
+                   help="JSONL of boards; each game starts from one (uniform over source games, then positions)")
     a = p.parse_args(argv)
     if a.stages < 1:
         p.error("--stages must be >= 1")
@@ -378,6 +516,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         train(
             a.games, a.alpha, a.seed, a.out, a.checkpoint_every, a.log_every,
             a.resume, a.init_value, a.keep_checkpoints, stages=a.stages, stage_tiles=a.stage_tile,
+            init_from=a.init_from, start_positions=a.start_positions,
         )
     except ValueError as e:  # e.g. bad stage tiles
         p.error(str(e))

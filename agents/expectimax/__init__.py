@@ -1,1 +1,3 @@
-"""P3: expectimax search with chance nodes."""
+from agents.expectimax.search import ExpectimaxAgent
+
+__all__ = ["ExpectimaxAgent"]

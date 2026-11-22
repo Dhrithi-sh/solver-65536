@@ -1,9 +1,9 @@
-
 """Shared-seed benchmark and late-game board collector."""
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import statistics
 import time
@@ -11,14 +11,60 @@ from pathlib import Path
 from typing import Callable, Dict, List
 
 from agents.base import Agent
-from agents.baselines import GreedyAgent, RandomAgent
+from agents.baselines import (
+    CornerAgent,
+    GreedyAgent,
+    MCTSAgent,
+    MinimaxAgent,
+    MonteCarloAgent,
+    RandomAgent,
+)
+from agents.deeprl.agent import DQNAgent
+from agents.heuristics import HeuristicEvaluator, heuristic_agents
+from agents.hybrid.registry import hybrid_agents
+from agents.ntuple.agent import make_ntuple_agent
 from engine.game import Game
 
-AGENTS: Dict[str, Callable[[], Agent]] = {
+
+def make_corner_agent():
+    return CornerAgent()
+
+
+def make_mcts_agent():
+    return MCTSAgent()
+
+
+def make_minimax_agent():
+    return MinimaxAgent()
+
+
+def make_monte_carlo_agent():
+    return MonteCarloAgent()
+
+
+def make_minimax_heuristic():
+    evaluator = HeuristicEvaluator.from_file("tuned")
+    return MinimaxAgent(depth=1, evaluator=evaluator)
+
+
+def make_dqn_agent(weights: str | None = None) -> Agent:
+    return DQNAgent(checkpoint=weights)
+
+
+AGENTS: Dict[str, Callable[..., Agent]] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
+    "corner": make_corner_agent,
+    "mcts": make_mcts_agent,
+    "minimax": make_minimax_agent,
+    "monte_carlo": make_monte_carlo_agent,
+    "minimax_heuristic": make_minimax_heuristic,
+    "ntuple": make_ntuple_agent,
+    "dqn": make_dqn_agent,
 }
 
+AGENTS.update(heuristic_agents())
+AGENTS.update(hybrid_agents())
 MILESTONES = (2048, 4096, 8192, 16384, 32768, 65536)
 
 
@@ -46,13 +92,18 @@ def play_game(agent: Agent, seed: int, boards_file=None) -> dict:
         # Save the first board that reaches 32768.
         if not board_saved and game.max_tile() >= 32768:
             if boards_file is not None:
+                board_snapshot = (
+                    [row[:] for row in game.board]
+                    if game.board and isinstance(game.board[0], (list, tuple))
+                    else list(game.board)
+                )
                 board_record = {
                     "agent": agent.name,
                     "seed": seed,
                     "score": game.score,
                     "move_number": len(game.moves),
                     "max_tile": game.max_tile(),
-                    "board": [row[:] for row in game.board],
+                    "board": board_snapshot,
                 }
 
                 boards_file.write(json.dumps(board_record) + "\n")
@@ -116,6 +167,23 @@ def main(argv: List[str] | None = None) -> dict:
     p.add_argument("--seed0", type=int, default=0)
     p.add_argument("--out-dir", default="results")
     p.add_argument(
+        "--append",
+        action="store_true",
+        help="Append results instead of replacing an existing file",
+    )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Explicitly replace an existing result file",
+    )
+
+    p.add_argument(
+        "--weights",
+        default=None,
+        help="Path to trained weights (currently used by the N-Tuple agent)",
+    )
+
+    p.add_argument(
         "--boards-out",
         default="results/late_game_boards.jsonl",
         help="File where boards reaching 32768 are saved",
@@ -125,21 +193,39 @@ def main(argv: List[str] | None = None) -> dict:
 
     if args.games < 1:
         p.error("--games must be at least 1")
+    if args.append and args.overwrite:
+        p.error("Use either --append or --overwrite, not both")
 
-    agent = AGENTS[args.agent]()
+    factory = AGENTS[args.agent]
+
+    if args.weights is not None:
+        if "weights" not in inspect.signature(factory).parameters:
+            p.error(f"--weights is not supported by agent {args.agent!r}")
+        agent = factory(weights=args.weights)
+    else:
+        agent = factory()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.agent}.jsonl"
+    if out_path.exists() and not (args.append or args.overwrite):
+        p.error(
+            f"{out_path} already exists. Use --append to add games "
+            "or --overwrite to replace it."
+        )
 
     boards_path = Path(args.boards_out)
     boards_path.parent.mkdir(parents=True, exist_ok=True)
 
     results = []
 
-    with out_path.open("w", encoding="utf-8") as f, \
-         boards_path.open("a", encoding="utf-8") as boards_file:
-
+    with (
+        out_path.open(
+            "a" if args.append else "w",
+            encoding="utf-8",
+        ) as f,
+        boards_path.open("a", encoding="utf-8") as boards_file,
+    ):
         for i in range(args.games):
             r = play_game(agent, args.seed0 + i, boards_file)
             results.append(r)
